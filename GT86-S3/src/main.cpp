@@ -18,6 +18,20 @@ Arduino_RGB_Display *gfx = new Arduino_RGB_Display(800, 480, rgbpanel, 0, true);
 #define INTER_RX   44
 HardwareSerial InterSerial(0);
 
+// ─── Protocole trame inter-ESP ────────────────────────────
+#define FRAME_SYNC1   0xAA
+#define FRAME_SYNC2   0x55
+#define FRAME_TYPE_RB 0x01
+#define FRAME_LEN     12
+
+struct __attribute__((packed)) UARTFrame {
+    uint8_t  sync1, sync2, type;
+    uint16_t speedX10;
+    int16_t  gxX1000;
+    int16_t  gyX1000;
+    uint8_t  fix, svs, crc;
+};
+
 // ─── RaceBox BLE ──────────────────────────────────────────
 #define RB_NAME  "Vroomvroom"
 #define SVC_UUID "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -38,6 +52,24 @@ volatile bool doConnect    = false;
 volatile bool doScan       = true;
 
 NimBLEAdvertisedDevice* advDevice = nullptr;
+
+// ─── Envoi trame UART ─────────────────────────────────────
+void sendUARTFrame() {
+    UARTFrame f;
+    f.sync1    = FRAME_SYNC1;
+    f.sync2    = FRAME_SYNC2;
+    f.type     = FRAME_TYPE_RB;
+    f.speedX10 = (uint16_t)(rb.speedKmh * 10.0f);
+    f.gxX1000  = (int16_t)(rb.gx * 1000.0f);
+    f.gyX1000  = (int16_t)(rb.gy * 1000.0f);
+    f.fix      = rb.fix;
+    f.svs      = rb.svs;
+    uint8_t crc = 0;
+    const uint8_t* p = (const uint8_t*)&f;
+    for (int i = 2; i < FRAME_LEN - 1; i++) crc ^= p[i];
+    f.crc = crc;
+    InterSerial.write((const uint8_t*)&f, FRAME_LEN);
+}
 
 // ─── Scan debug ───────────────────────────────────────────
 #define MAX_SCAN 7
@@ -143,25 +175,41 @@ void drawBackground() {
     gfx->setCursor(170, 400); gfx->print("km/h");
 }
 
+// Valeurs précédentes pour affichage différentiel
+bool    prevBleOk  = false;
+uint8_t prevFix    = 255;
+uint8_t prevSvs    = 255;
+float   prevVoltage = -1;
+int     prevSpd     = -1;
+
 void drawStatusBar() {
+    bool bleOk = bleConnected;
+    bool changed = (bleOk != prevBleOk) || (rb.fix != prevFix)
+                || (rb.svs != prevSvs)  || (fabsf(rb.voltage - prevVoltage) >= 0.05f);
+    if (!changed) return;
+
     gfx->fillRect(0, 4, 456, 38, BLACK);
     gfx->setTextSize(2);
 
     gfx->setCursor(8, 12);
-    gfx->setTextColor(bleConnected ? (uint16_t)0x07E0 : (uint16_t)0xF800);
-    gfx->print(bleConnected ? "BLE OK" : "BLE...");
+    gfx->setTextColor(bleOk ? (uint16_t)0x07E0 : (uint16_t)0xF800);
+    gfx->print(bleOk ? "BLE OK" : "BLE...");
 
     gfx->setCursor(168, 12);
     const char* fixStr[] = {"NO FIX", "DEAD-R", "  2D  ", "  3D  "};
     gfx->setTextColor(rb.fix >= 3 ? (uint16_t)0x07E0 : (uint16_t)0xF800);
     gfx->print(rb.fix <= 3 ? fixStr[rb.fix] : "  ??  ");
 
-    // SVs et tension avec padding fixe pour éviter les artefacts
     char buf[20];
     snprintf(buf, sizeof(buf), " %2dSV %4.1fV", rb.svs, rb.voltage);
     gfx->setTextColor(WHITE);
     gfx->setCursor(312, 12);
     gfx->print(buf);
+
+    prevBleOk  = bleOk;
+    prevFix    = rb.fix;
+    prevSvs    = rb.svs;
+    prevVoltage = rb.voltage;
 }
 
 // Panneau gauche : écran d'attente pendant le scan BLE
@@ -186,10 +234,12 @@ void drawScanList() {
 }
 
 void drawSpeed() {
-    gfx->fillRect(10, 50, 435, 335, BLACK);
     int spd = (int)(rb.speedKmh + 0.5f);
     if (spd < 0) spd = 0;
+    if (spd == prevSpd) return;
+    prevSpd = spd;
 
+    gfx->fillRect(10, 50, 435, 335, BLACK);
     uint8_t sz;
     int x;
     if (spd < 10)       { sz = 16; x = (455 - 1 * 6 * 16) / 2; }
@@ -241,6 +291,7 @@ void setup() {
 }
 
 uint32_t lastDraw = 0;
+uint32_t lastUART = 0;
 
 void loop() {
     if (doConnect) {
@@ -268,5 +319,9 @@ void loop() {
         drawSpeed();
         drawGForce();
         drawStatusBar();
+    }
+    if (bleConnected && millis() - lastUART >= 100) {  // 10 Hz vers GT86
+        lastUART = millis();
+        sendUARTFrame();
     }
 }
