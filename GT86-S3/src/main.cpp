@@ -164,31 +164,24 @@ void drawStatusBar() {
     gfx->print(buf);
 }
 
-// Panneau gauche : liste des appareils scannés (avant connexion)
+// Panneau gauche : écran d'attente pendant le scan BLE
 void drawScanList() {
     gfx->fillRect(10, 50, 435, 380, BLACK);
     gfx->setTextSize(2);
-    gfx->setTextColor(0xFFE0);  // jaune
+    gfx->setTextColor(0xFFE0);
     gfx->setCursor(10, 58);
-    gfx->print("SCAN BLE");
-
+    gfx->print("SCAN BLE...");
     gfx->setTextSize(1);
+    gfx->setTextColor(WHITE);
     for (int i = 0; i < scanFoundCount; i++) {
-        gfx->setTextColor(scanNames[i].startsWith("Vroomvroom") ||
-                          scanNames[i].startsWith("vroomvroom") ? (uint16_t)0x07E0 : WHITE);
         gfx->setCursor(10, 90 + i * 20);
         gfx->print("> ");
         gfx->print(scanNames[i].c_str());
     }
-    // Compteur de temps pour confirmer que le loop tourne
-    gfx->setTextColor(WHITE);
-    gfx->setCursor(10, 230);
-    gfx->print("t=");
-    gfx->print(millis() / 1000);
-    gfx->print("s  ");
     if (scanFoundCount == 0) {
+        gfx->setTextColor(0x4208);
         gfx->setCursor(10, 90);
-        gfx->print("aucun appareil...");
+        gfx->print("recherche en cours...");
     }
 }
 
@@ -247,8 +240,7 @@ void setup() {
     scan->setDuplicateFilter(false);
 }
 
-uint32_t lastDraw    = 0;
-uint32_t lastScanTick = 0;
+uint32_t lastDraw = 0;
 
 void loop() {
     if (doConnect) {
@@ -269,10 +261,6 @@ void loop() {
     if (scanDirty && !bleConnected) {
         scanDirty = false;
         drawScanList();
-    }
-    if (!bleConnected && millis() - lastScanTick >= 2000) {
-        lastScanTick = millis();
-        scanDirty = true;
     }
     if (rbFresh && millis() - lastDraw >= 40) {
         rbFresh  = false;
