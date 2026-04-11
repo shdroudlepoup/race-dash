@@ -19,11 +19,11 @@ Arduino_RGB_Display *gfx = new Arduino_RGB_Display(
     800 /* width */, 480 /* height */, rgbpanel, 0 /* rotation */, true /* auto_flush */
 );
 
-// UART inter-ESP : GPIO11=TX, GPIO12=RX (UART1, pins libres)
+// UART inter-ESP : GPIO43=TX, GPIO44=RX (UART0 exclusif)
 #define UART_BAUD 115200
-#define INTER_TX  11
-#define INTER_RX  12
-HardwareSerial InterSerial(1);  // UART1
+#define INTER_TX  43
+#define INTER_RX  44
+HardwareSerial InterSerial(0);  // UART0 — seul utilisateur de GPIO43/44
 
 uint32_t lastPing    = 0;
 uint32_t pingCount   = 0;
