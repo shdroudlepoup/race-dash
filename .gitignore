@@ -7,6 +7,9 @@
 # Claude
 .claude/
 
+# Claude
+CLAUDE.md
+
 # OS
 .DS_Store
 Thumbs.db
