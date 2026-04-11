@@ -1,32 +1,42 @@
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 
-// Plus besoin de déclarer les pins ici, PlatformIO s'en charge !
-TFT_eSPI tft = TFT_eSPI(); 
+TFT_eSPI tft = TFT_eSPI();
+
+// UART inter-ESP : GPIO16=RX2, GPIO17=TX2 (Serial2)
+#define UART_BAUD 115200
+#define UART_RX   25
+#define UART_TX   26
+
+uint32_t pongCount = 0;
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("Demarrage TFT_eSPI...");
+  Serial2.begin(UART_BAUD, SERIAL_8N1, UART_RX, UART_TX);
 
   tft.begin();
-  tft.setRotation(0); 
-
-  // Fond noir
+  tft.setRotation(0);
   tft.fillScreen(TFT_BLACK);
-  
-  // Petit cercle de test
   tft.drawCircle(120, 120, 118, TFT_ORANGE);
-  
-  // Texte au centre
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextDatum(MC_DATUM); // Aligne le texte au Milieu-Centre
-  tft.drawString("GT86 READY", 120, 120, 4); // Le '4' est la taille de la police
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("GT86", 120, 100, 4);
+  tft.drawString("READY", 120, 130, 4);
 }
 
 void loop() {
-  // Un petit point qui clignote pour voir que l'ESP tourne
-  tft.fillCircle(120, 160, 5, TFT_RED);
-  delay(500);
-  tft.fillCircle(120, 160, 5, TFT_BLACK);
-  delay(500);
+  if (Serial2.available()) {
+    String msg = Serial2.readStringUntil('\n');
+    msg.trim();
+    Serial.println("Recu: [" + msg + "]");
+    if (msg == "PING") {
+      Serial2.println("PONG");
+      pongCount++;
+      Serial.println("PONG #" + String(pongCount));
+      tft.fillRect(60, 160, 120, 30, TFT_BLACK);
+      tft.setTextDatum(MC_DATUM);
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.drawString(String(pongCount), 120, 175, 4);
+    }
+  }
 }

@@ -19,32 +19,74 @@ Arduino_RGB_Display *gfx = new Arduino_RGB_Display(
     800 /* width */, 480 /* height */, rgbpanel, 0 /* rotation */, true /* auto_flush */
 );
 
+// UART inter-ESP : GPIO11=TX, GPIO12=RX (UART1, pins libres)
+#define UART_BAUD 115200
+#define INTER_TX  11
+#define INTER_RX  12
+HardwareSerial InterSerial(1);  // UART1
+
+uint32_t lastPing    = 0;
+uint32_t pingCount   = 0;
+uint32_t pongCount   = 0;
+
+void drawStatus() {
+    gfx->fillRect(0, 80, 800, 320, BLACK);
+    gfx->setTextSize(3);
+
+    gfx->setTextColor(0xFD20);
+    gfx->setCursor(60, 120);
+    gfx->print("PING envoyes : ");
+    gfx->print(pingCount);
+
+    gfx->setTextColor(pongCount == pingCount ? 0x07E0 : 0xF800);  // vert si OK, rouge si timeout
+    gfx->setCursor(60, 180);
+    gfx->print("PONG recus   : ");
+    gfx->print(pongCount);
+
+    gfx->setTextColor(WHITE);
+    gfx->setCursor(60, 260);
+    gfx->setTextSize(2);
+    if (pongCount == pingCount && pingCount > 0) {
+        gfx->print("UART OK - GT86 repond");
+    } else if (pingCount > 0) {
+        gfx->print("En attente de GT86...");
+    }
+}
+
 void setup() {
     delay(500);
+    InterSerial.begin(UART_BAUD, SERIAL_8N1, INTER_RX, INTER_TX);
 
     if (!gfx->begin()) return;
 
     gfx->fillScreen(BLACK);
-
-    // Barre rouge en haut (style GT3)
     gfx->fillRect(0, 0, 800, 6, 0xF800);
-
-    // Titre
-    gfx->setTextColor(WHITE);
-    gfx->setTextSize(5);
-    gfx->setCursor(220, 180);
-    gfx->print("GT86 READY");
-
-    // Sous-titre
-    gfx->setTextColor(0xFD20);  // orange
-    gfx->setTextSize(2);
-    gfx->setCursor(290, 270);
-    gfx->print("Race Dash  S3  800x480");
-
-    // Barre rouge en bas
     gfx->fillRect(0, 474, 800, 6, 0xF800);
+
+    gfx->setTextColor(WHITE);
+    gfx->setTextSize(4);
+    gfx->setCursor(220, 30);
+    gfx->print("UART TEST");
+
+    drawStatus();
 }
 
 void loop() {
-    delay(1000);
+    // Envoie PING toutes les secondes
+    if (millis() - lastPing >= 1000) {
+        lastPing = millis();
+        pingCount++;
+        InterSerial.println("PING");
+        drawStatus();
+    }
+
+    // Lit la réponse
+    if (InterSerial.available()) {
+        String resp = InterSerial.readStringUntil('\n');
+        resp.trim();
+        if (resp == "PONG") {
+            pongCount++;
+            drawStatus();
+        }
+    }
 }
