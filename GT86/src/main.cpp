@@ -76,12 +76,13 @@ bool obdConnected=false; bool obdFresh=false;
 // ─── PID round-robin ─────────────────────────────────────
 struct PIDDef { const char* cmd; uint8_t pid; uint8_t dataBytes; };
 const PIDDef pidList[] = {
-    {"010C\r",0x0C,2}, {"0105\r",0x05,1}, {"010C\r",0x0C,2},
-    {"0104\r",0x04,1}, {"010D\r",0x0D,1}, {"010F\r",0x0F,1},
-    {"0142\r",0x42,2}, {"012F\r",0x2F,1}, {"010E\r",0x0E,1},
-    {"0124\r",0x24,4}, {"0101\r",0x01,4}, {"015C\r",0x5C,1},
+    {"010C\r",0x0C,2},  // RPM
+    {"0105\r",0x05,1},  // Coolant
+    {"010C\r",0x0C,2},  // RPM (2x)
+    {"0104\r",0x04,1},  // Load
+    {"010D\r",0x0D,1},  // Speed
 };
-#define PID_COUNT 12
+#define PID_COUNT 5
 int currentPID=0; bool queryPending=false; uint32_t queryStart=0; String obdResp="";
 
 // ─── RaceBox (reçu du S3) ────────────────────────────────
