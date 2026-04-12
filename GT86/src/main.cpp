@@ -92,14 +92,19 @@ uint8_t rxBufU[FRAME_LEN_RB]; uint8_t rxPosU=0;
 void processUART() {
     while (Serial2.available()) {
         uint8_t b = Serial2.read();
-        if(rxPosU==0){if(b==FRAME_SYNC1)rxBufU[rxPosU++]=b;}
-        else if(rxPosU==1){if(b==FRAME_SYNC2)rxBufU[rxPosU++]=b;else rxPosU=0;}
-        else{rxBufU[rxPosU++]=b;
-            if(rxPosU==FRAME_LEN_RB){rxPosU=0;uint8_t crc=0;
-                for(int i=2;i<FRAME_LEN_RB-1;i++)crc^=rxBufU[i];
-                if(crc==rxBufU[FRAME_LEN_RB-1]&&rxBufU[2]==FRAME_TYPE_RB){
+        if (rxPosU==0) { if(b==FRAME_SYNC1) rxBufU[rxPosU++]=b; }
+        else if (rxPosU==1) { if(b==FRAME_SYNC2) rxBufU[rxPosU++]=b; else rxPosU=0; }
+        else {
+            rxBufU[rxPosU++]=b;
+            if (rxPosU==FRAME_LEN_RB) {
+                rxPosU=0; uint8_t crc=0;
+                for(int i=2;i<FRAME_LEN_RB-1;i++) crc^=rxBufU[i];
+                if(crc==rxBufU[FRAME_LEN_RB-1]&&rxBufU[2]==FRAME_TYPE_RB) {
                     rxSpeed=((uint16_t)(rxBufU[3]|rxBufU[4]<<8))/10.0f;
-                    rxFix=rxBufU[9];lastRx=millis();}}}
+                    rxFix=rxBufU[9]; lastRx=millis();
+                }
+            }
+        }
     }
 }
 
@@ -110,207 +115,243 @@ void sendOBDFrame() {
     f.batteryMV=obdBatteryMV; f.afr=obdAFR; f.load=obdLoad;
     f.fuel=obdFuel; f.timing=obdTiming; f.mil=obdMIL;
     f.oilTemp=obdOilTemp; f.speed=obdSpeed;
-    uint8_t crc=0; for(int i=2;i<OBD_FRAME_LEN-1;i++)crc^=((uint8_t*)&f)[i];
-    f.crc=crc; Serial2.write((const uint8_t*)&f,OBD_FRAME_LEN);
+    uint8_t crc=0; for(int i=2;i<OBD_FRAME_LEN-1;i++) crc^=((uint8_t*)&f)[i];
+    f.crc=crc; Serial2.write((const uint8_t*)&f, OBD_FRAME_LEN);
 }
 
 // ─── Parser réponse OBD ──────────────────────────────────
-bool parseOBDHex(const String& resp,uint8_t pid,uint8_t* data,int count) {
+bool parseOBDHex(const String& resp, uint8_t pid, uint8_t* data, int count) {
     char prefix[8]; snprintf(prefix,8,"41%02X",pid);
     String clean=resp; clean.replace(" ","");
-    int idx=clean.indexOf(prefix); if(idx<0) return false; idx+=4;
-    for(int i=0;i<count;i++){if(idx+2>(int)clean.length())return false;
-    data[i]=strtol(clean.substring(idx,idx+2).c_str(),NULL,16);idx+=2;}
+    int idx=clean.indexOf(prefix); if(idx<0) return false;
+    idx+=4;
+    for(int i=0;i<count;i++) {
+        if(idx+2>(int)clean.length()) return false;
+        data[i]=strtol(clean.substring(idx,idx+2).c_str(),NULL,16); idx+=2;
+    }
     return true;
 }
+
 void applyPIDValue() {
     uint8_t data[4]; uint8_t pid=pidList[currentPID].pid;
     if(!parseOBDHex(obdResp,pid,data,pidList[currentPID].dataBytes)) return;
-    switch(pid){
-        case 0x0C:obdRpm=(data[0]*256+data[1])/4;break;
-        case 0x05:obdCoolant=(int16_t)data[0]-40;break;
-        case 0x04:obdLoad=data[0]*100/255;break;
-        case 0x0D:obdSpeed=data[0];break;
-        case 0x0F:obdIntakeTemp=(int16_t)data[0]-40;break;
-        case 0x42:obdBatteryMV=data[0]*256+data[1];break;
-        case 0x2F:obdFuel=data[0]*100/255;break;
-        case 0x0E:obdTiming=(int8_t)(data[0]/2-64);break;
-        case 0x24:obdAFR=(uint16_t)((data[0]*256+data[1])*1470L/32768);break;
-        case 0x01:obdMIL=data[0];break;
-        case 0x5C:obdOilTemp=(int16_t)data[0]-40;break;
+    switch(pid) {
+        case 0x0C: obdRpm=(data[0]*256+data[1])/4; break;
+        case 0x05: obdCoolant=(int16_t)data[0]-40; break;
+        case 0x04: obdLoad=data[0]*100/255; break;
+        case 0x0D: obdSpeed=data[0]; break;
+        case 0x0F: obdIntakeTemp=(int16_t)data[0]-40; break;
+        case 0x42: obdBatteryMV=data[0]*256+data[1]; break;
+        case 0x2F: obdFuel=data[0]*100/255; break;
+        case 0x0E: obdTiming=(int8_t)(data[0]/2-64); break;
+        case 0x24: obdAFR=(uint16_t)((data[0]*256+data[1])*1470L/32768); break;
+        case 0x01: obdMIL=data[0]; break;
+        case 0x5C: obdOilTemp=(int16_t)data[0]-40; break;
     }
     obdFresh=true;
 }
+
 void processOBD() {
     if(!obdConnected) return;
-    while(bleStream.available()){char c=bleStream.read();
-        if(c=='>'){if(queryPending){applyPIDValue();queryPending=false;currentPID=(currentPID+1)%PID_COUNT;}obdResp="";}
-        else if(c>=0x20&&c<=0x7E) obdResp+=c;}
-    if(!queryPending&&millis()-queryStart>=50){queryStart=millis();bleHead=bleTail=0;obdResp="";
-        bleWriteChar->writeValue((uint8_t*)pidList[currentPID].cmd,strlen(pidList[currentPID].cmd));queryPending=true;}
-    if(queryPending&&millis()-queryStart>5000){queryPending=false;obdResp="";currentPID=(currentPID+1)%PID_COUNT;}
+    while(bleStream.available()) {
+        char c=bleStream.read();
+        if(c=='>') {
+            if(queryPending){applyPIDValue();queryPending=false;currentPID=(currentPID+1)%PID_COUNT;}
+            obdResp="";
+        } else if(c>=0x20&&c<=0x7E) obdResp+=c;
+    }
+    if(!queryPending&&millis()-queryStart>=50) {
+        queryStart=millis(); bleHead=bleTail=0; obdResp="";
+        bleWriteChar->writeValue((uint8_t*)pidList[currentPID].cmd, strlen(pidList[currentPID].cmd));
+        queryPending=true;
+    }
+    if(queryPending&&millis()-queryStart>5000) {
+        queryPending=false; obdResp=""; currentPID=(currentPID+1)%PID_COUNT;
+    }
 }
 
 // ─── Affichage GC9A01 ────────────────────────────────────
-int prevCool=-999;int prevRpm=-1;uint8_t prevFix=255;bool prevS3=false;bool prevObd=false;
-void drawCoolant(int t){tft.fillRect(20,68,200,80,TFT_BLACK);
+int prevCool=-999; int prevRpm=-1; uint8_t prevFix=255; bool prevS3=false; bool prevObd=false;
+
+void drawCoolant(int t) {
+    tft.fillRect(20,68,200,80,TFT_BLACK);
     uint16_t c=t>100?TFT_RED:(t>90?TFT_ORANGE:TFT_GREEN);
-    uint8_t sz=(t<100&&t>-10)?8:6;int d=(abs(t)<10)?1:(abs(t)<100)?2:3;if(t<0)d++;
-    tft.setTextSize(sz);tft.setTextColor(c,TFT_BLACK);tft.setCursor((240-d*6*sz)/2,75);tft.print(t);}
-void drawRpm(int r){tft.fillRect(20,160,200,26,TFT_BLACK);tft.setTextSize(2);tft.setTextColor(TFT_WHITE,TFT_BLACK);
-    char b[16];snprintf(b,16,"%d RPM",r);tft.setCursor((240-(int)strlen(b)*12)/2,162);tft.print(b);}
-void drawInd(bool s3,uint8_t fx,bool ob){tft.fillRect(20,196,200,32,TFT_BLACK);
-    tft.fillCircle(60,210,6,fx>=3?TFT_GREEN:TFT_RED);tft.setTextSize(1);
-    tft.setTextColor(s3?TFT_GREEN:(uint16_t)0x4208,TFT_BLACK);tft.setCursor(80,206);tft.print(s3?"S3":"--");
-    tft.setTextColor(ob?TFT_GREEN:(uint16_t)0x4208,TFT_BLACK);tft.setCursor(110,206);tft.print(ob?"OBD":"---");}
-void updateDisplay(){bool s3=(millis()-lastRx)<2000;
+    uint8_t sz=(t<100&&t>-10)?8:6;
+    int d=(abs(t)<10)?1:(abs(t)<100)?2:3; if(t<0)d++;
+    tft.setTextSize(sz); tft.setTextColor(c,TFT_BLACK);
+    tft.setCursor((240-d*6*sz)/2,75); tft.print(t);
+}
+void drawRpm(int r) {
+    tft.fillRect(20,160,200,26,TFT_BLACK);
+    tft.setTextSize(2); tft.setTextColor(TFT_WHITE,TFT_BLACK);
+    char b[16]; snprintf(b,16,"%d RPM",r);
+    tft.setCursor((240-(int)strlen(b)*12)/2,162); tft.print(b);
+}
+void drawInd(bool s3,uint8_t fx,bool ob) {
+    tft.fillRect(20,196,200,32,TFT_BLACK);
+    tft.fillCircle(60,210,6,fx>=3?TFT_GREEN:TFT_RED);
+    tft.setTextSize(1);
+    tft.setTextColor(s3?TFT_GREEN:(uint16_t)0x4208,TFT_BLACK);
+    tft.setCursor(80,206); tft.print(s3?"S3":"--");
+    tft.setTextColor(ob?TFT_GREEN:(uint16_t)0x4208,TFT_BLACK);
+    tft.setCursor(110,206); tft.print(ob?"OBD":"---");
+}
+void updateDisplay() {
+    bool s3=(millis()-lastRx)<2000;
     if(obdCoolant!=prevCool){drawCoolant(obdCoolant);prevCool=obdCoolant;}
     if((int)obdRpm!=prevRpm){drawRpm(obdRpm);prevRpm=obdRpm;}
-    if(rxFix!=prevFix||s3!=prevS3||obdConnected!=prevObd){drawInd(s3,rxFix,obdConnected);prevFix=rxFix;prevS3=s3;prevObd=obdConnected;}}
+    if(rxFix!=prevFix||s3!=prevS3||obdConnected!=prevObd) {
+        drawInd(s3,rxFix,obdConnected); prevFix=rxFix; prevS3=s3; prevObd=obdConnected;
+    }
+}
 
-// ─── Scan BLE + Connexion (Bluedroid + reset complet) ────
+// ─── Scan BLE + connexion ────────────────────────────────
 #define MAX_SCAN 8
-String btNames[MAX_SCAN]; int btCount=0;
-
+String btNames[MAX_SCAN], btAddrs[MAX_SCAN]; int btCount=0;
 void drawScan(const char* status) {
     tft.fillRect(10,55,220,165,TFT_BLACK);
-    tft.setTextSize(2);tft.setTextColor(TFT_YELLOW,TFT_BLACK);
-    tft.setCursor(54,58);tft.print("BLE SCAN");tft.setTextSize(1);
-    for(int i=0;i<btCount&&i<6;i++){
-        bool t=btNames[i].indexOf("Vlink")>=0||btNames[i].indexOf("iCar")>=0;
+    tft.setTextSize(2); tft.setTextColor(TFT_YELLOW,TFT_BLACK);
+    tft.setCursor(54,58); tft.print("BLE SCAN");
+    tft.setTextSize(1);
+    for(int i=0;i<btCount&&i<6;i++) {
+        bool t=btNames[i].indexOf("Vlink")>=0||btNames[i].indexOf("iCar")>=0||btNames[i].indexOf("OBD")>=0;
         tft.setTextColor(t?TFT_GREEN:TFT_WHITE,TFT_BLACK);
-        String txt=btNames[i];if(txt.length()>24)txt=txt.substring(0,24);
-        tft.setCursor((240-(int)txt.length()*6)/2,82+i*14);tft.print(txt.c_str());}
+        String txt=btNames[i]; if(txt.length()>24)txt=txt.substring(0,24);
+        tft.setCursor((240-(int)txt.length()*6)/2,82+i*14); tft.print(txt.c_str());
+    }
     if(status){tft.setTextSize(1);tft.setTextColor(TFT_ORANGE,TFT_BLACK);
     tft.setCursor((240-(int)strlen(status)*6)/2,170);tft.print(status);}
 }
 
 bool scanAndConnect() {
-    // ── Reset complet du stack BLE à chaque tentative ─────
-    BLEDevice::deinit(false);
-    delay(500);
-    BLEDevice::init("");
-
     btCount=0;
     bleHead=bleTail=0; bleNotifyChar=nullptr; bleWriteChar=nullptr;
-    pClient=nullptr;
+    if(pClient){pClient->disconnect(); delete pClient; pClient=nullptr;}
 
-    // ── Scan (3 rounds de 3s) ─────────────────────────────
+    drawScan("scanning...");
     BLEScan* pScan = BLEDevice::getScan();
     pScan->setActiveScan(true);
     pScan->setInterval(100);
     pScan->setWindow(99);
+    BLEScanResults results = pScan->start(6, false);
 
-    BLEAdvertisedDevice* targetDev = nullptr;
-
-    for (int round=0; round<3 && !targetDev; round++) {
-        char msg[24]; snprintf(msg,24,"scan %d/3...",round+1);
-        drawScan(msg);
-        BLEScanResults results = pScan->start(3, false);
-        for (int i=0; i<results.getCount(); i++) {
-            BLEAdvertisedDevice dev = results.getDevice(i);
-            String name=String(dev.getName().c_str());
-            if(name.length()==0) continue;
-            bool dup=false;
-            for(int j=0;j<btCount;j++) if(btNames[j]==name){dup=true;break;}
-            if(!dup && btCount<MAX_SCAN) btNames[btCount++]=name;
-            if(name.indexOf("Vlink")>=0||name.indexOf("iCar")>=0||name.indexOf("OBD")>=0) {
-                targetDev = new BLEAdvertisedDevice(dev);
-                Serial.printf("[BLE] Found: %s addr=%s\n",name.c_str(),dev.getAddress().toString().c_str());
-            }
-        }
-        if (!targetDev) pScan->clearResults();
+    // Trouver l'OBD dans les résultats
+    int targetIdx = -1;
+    for(int i=0; i<results.getCount()&&btCount<MAX_SCAN; i++) {
+        BLEAdvertisedDevice dev = results.getDevice(i);
+        String name=String(dev.getName().c_str());
+        if(name.length()==0) continue;
+        btNames[btCount]=name;
+        btAddrs[btCount]=String(dev.getAddress().toString().c_str());
+        if(name.indexOf("Vlink")>=0||name.indexOf("iCar")>=0||name.indexOf("OBD")>=0||name.indexOf("ELM")>=0)
+            targetIdx=btCount;
+        btCount++;
     }
 
-    if (!targetDev) {
-        char msg[24]; snprintf(msg,24,"%d appareils",btCount);
-        drawScan(msg); delay(500); pScan->clearResults(); return false;
-    }
+    char msg[32]; snprintf(msg,32,"%d appareils",btCount);
+    drawScan(targetIdx>=0?btNames[targetIdx].c_str():msg);
+    if(targetIdx<0){delay(500);pScan->clearResults();return false;}
 
-    // ── Connexion directe par device (gère le type d'adresse) ──
-    drawScan("connexion...");
+    // ── Connexion directe depuis les résultats (avant clearResults) ──
+    drawScan("1/4 connexion...");
     pClient = BLEDevice::createClient();
-    Serial.printf("[BLE] Connecting to %s...\n", targetDev->getAddress().toString().c_str());
-    bool connected = pClient->connect(targetDev);
-    pScan->clearResults();
-    delete targetDev;
-    if (!connected) {
-        Serial.println("[BLE] Connect FAIL");
-        drawScan("ECHEC connexion");
-        delay(2000); return false;
+    BLEAdvertisedDevice targetDev = results.getDevice(targetIdx >= btCount ? 0 : targetIdx);
+    // Retrouver le vrai index dans results (btCount peut différer car on skip les sans-nom)
+    for(int i=0; i<results.getCount(); i++) {
+        BLEAdvertisedDevice d = results.getDevice(i);
+        if(String(d.getAddress().toString().c_str())==btAddrs[targetIdx]) {
+            targetDev=d; break;
+        }
     }
+    pScan->clearResults();
+
+    Serial.printf("[BLE] Connecting to %s\n", btAddrs[targetIdx].c_str());
+    if(!pClient->connect(&targetDev)) {drawScan("ECHEC connexion");delay(2000);return false;}
     Serial.println("[BLE] Connected!");
 
-    // ── Services ──────────────────────────────────────────
-    drawScan("services...");
+    // ── Services ──
+    drawScan("2/4 services...");
     auto* svcs = pClient->getServices();
-    for(auto it=svcs->begin();it!=svcs->end()&&!bleWriteChar;++it){
-        auto* chars=it->second->getCharacteristics();
-        BLERemoteCharacteristic *nCh=nullptr,*wCh=nullptr;
-        for(auto cit=chars->begin();cit!=chars->end();++cit){
+    for(auto it=svcs->begin(); it!=svcs->end()&&!bleWriteChar; ++it) {
+        auto* chars = it->second->getCharacteristics();
+        BLERemoteCharacteristic *nCh=nullptr, *wCh=nullptr;
+        for(auto cit=chars->begin(); cit!=chars->end(); ++cit) {
             auto* ch=cit->second;
-            Serial.printf("[BLE] Char %s N=%d W=%d\n",ch->getUUID().toString().c_str(),ch->canNotify(),ch->canWrite());
-            if(ch->canNotify()&&!nCh)nCh=ch;
-            if(ch->canWrite()&&!wCh)wCh=ch;}
-        if(nCh&&wCh){bleNotifyChar=nCh;bleWriteChar=wCh;}}
-    if(!bleNotifyChar||!bleWriteChar){drawScan("no chars");delay(2000);pClient->disconnect();return false;}
+            if(ch->canNotify()&&!nCh) nCh=ch;
+            if(ch->canWrite()&&!wCh) wCh=ch;
+        }
+        if(nCh&&wCh){bleNotifyChar=nCh; bleWriteChar=wCh;}
+    }
+    if(!bleNotifyChar||!bleWriteChar){drawScan("ECHEC: no chars");delay(2000);pClient->disconnect();return false;}
 
-    // ── Notify ────────────────────────────────────────────
-    drawScan("notify...");
+    // ── Notify ──
+    drawScan("3/4 notify...");
     bleNotifyChar->registerForNotify(bleNotifyCB);
     delay(500);
 
-    // ── Init AT ───────────────────────────────────────────
+    // ── Init AT ──
     const char* cmds[]={"ATI\r","ATE0\r","ATL0\r","ATSP0\r"};
     const char* labels[]={"ATI","ATE0","ATL0","ATSP0"};
     String responses[4]; bool hasPrompt=false;
-    for(int c=0;c<4;c++){
-        bleHead=bleTail=0; drawScan(labels[c]);
-        bleWriteChar->writeValue((uint8_t*)cmds[c],strlen(cmds[c]));
+    for(int c=0;c<4;c++) {
+        bleHead=bleTail=0;
+        drawScan(labels[c]);
+        bleWriteChar->writeValue((uint8_t*)cmds[c], strlen(cmds[c]));
         delay(2000);
         String r="";
         while(bleStream.available()&&r.length()<50){char ch=bleStream.read();r+=(ch>=0x20&&ch<=0x7E)?ch:'.';}
-        responses[c]=r; if(r.indexOf('>')>=0)hasPrompt=true;
-        Serial.printf("[AT] %s -> '%s'\n",labels[c],r.c_str());
+        responses[c]=r;
+        if(r.indexOf('>')>=0) hasPrompt=true;
     }
-
-    tft.fillRect(10,55,220,165,TFT_BLACK);tft.setTextSize(1);
-    for(int c=0;c<4;c++){tft.setTextColor(TFT_YELLOW,TFT_BLACK);tft.setCursor(25,62+c*24);tft.print(labels[c]);tft.print(":");
-        tft.setTextColor(TFT_WHITE,TFT_BLACK);tft.setCursor(25,72+c*24);tft.print(responses[c].substring(0,28).c_str());}
+    tft.fillRect(10,55,220,165,TFT_BLACK); tft.setTextSize(1);
+    for(int c=0;c<4;c++){
+        tft.setTextColor(TFT_YELLOW,TFT_BLACK); tft.setCursor(25,62+c*24); tft.print(labels[c]); tft.print(":");
+        tft.setTextColor(TFT_WHITE,TFT_BLACK); tft.setCursor(25,72+c*24); tft.print(responses[c].substring(0,28).c_str());
+    }
     tft.setTextColor(hasPrompt?TFT_GREEN:TFT_RED,TFT_BLACK);
-    tft.setCursor(40,164);tft.print(hasPrompt?"ELM327 OK!":"pas de prompt >");
+    tft.setCursor(40,164); tft.print(hasPrompt?"ELM327 OK!":"pas de prompt >");
     delay(3000);
     if(!hasPrompt){pClient->disconnect();return false;}
-    bleHead=bleTail=0; return true;
+    bleHead=bleTail=0;
+    return true;
 }
 
-void switchToOBDDisplay(){tft.fillRect(10,55,220,170,TFT_BLACK);
-    tft.setTextSize(2);tft.setTextColor(0x4208,TFT_BLACK);tft.setCursor(100,148);tft.print("\xF7""C");
-    drawCoolant(0);drawRpm(0);drawInd(false,0,true);}
+void switchToOBDDisplay() {
+    tft.fillRect(10,55,220,170,TFT_BLACK);
+    tft.setTextSize(2); tft.setTextColor(0x4208,TFT_BLACK);
+    tft.setCursor(100,148); tft.print("\xF7""C");
+    drawCoolant(0); drawRpm(0); drawInd(false,0,true);
+}
 
 // ─── Setup ────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
     Serial2.begin(UART_BAUD, SERIAL_8N1, UART_RX, UART_TX);
-    tft.begin();tft.setRotation(0);tft.fillScreen(TFT_BLACK);
+    tft.begin(); tft.setRotation(0); tft.fillScreen(TFT_BLACK);
     tft.drawCircle(120,120,118,TFT_ORANGE);
-    tft.setTextSize(3);tft.setTextColor(TFT_WHITE,TFT_BLACK);tft.setCursor(74,24);tft.print("GT86");
+    tft.setTextSize(3); tft.setTextColor(TFT_WHITE,TFT_BLACK);
+    tft.setCursor(74,24); tft.print("GT86");
 
-    nvs_flash_erase(); nvs_flash_init();
+    // Nettoyer le NVS BLE (bonds corrompus par les changements de stack)
+    nvs_flash_erase();
+    nvs_flash_init();
+
     BLEDevice::init("");
     obdConnected = scanAndConnect();
     if(obdConnected) switchToOBDDisplay();
 }
 
 // ─── Loop ─────────────────────────────────────────────────
-uint32_t lastDraw=0,lastOBD=0,lastHB=0,lastRetry=0;
+uint32_t lastDraw=0, lastOBD=0, lastHB=0, lastRetry=0;
 void loop() {
     processUART(); processOBD();
-    if(millis()-lastDraw>=100){lastDraw=millis();if(obdConnected)updateDisplay();}
-    if(obdConnected&&millis()-lastOBD>=200){lastOBD=millis();sendOBDFrame();}
-    if(!obdConnected&&millis()-lastRetry>=10000){lastRetry=millis();
+    if(millis()-lastDraw>=100){lastDraw=millis(); if(obdConnected) updateDisplay();}
+    if(obdConnected&&millis()-lastOBD>=200){lastOBD=millis(); sendOBDFrame();}
+    if(!obdConnected&&millis()-lastRetry>=8000){lastRetry=millis();
         obdConnected=scanAndConnect();
-        if(obdConnected)switchToOBDDisplay();}
+        if(obdConnected) switchToOBDDisplay();
+    }
     if(millis()-lastHB>=5000){lastHB=millis();
-        Serial.printf("[HB] obd=%d rpm=%d cool=%d bat=%d\n",obdConnected,obdRpm,obdCoolant,obdBatteryMV);}
+        Serial.printf("[HB] obd=%d rpm=%d cool=%d bat=%d mil=%02X\n",
+                      obdConnected,obdRpm,obdCoolant,obdBatteryMV,obdMIL);}
 }
