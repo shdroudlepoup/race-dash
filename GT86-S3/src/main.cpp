@@ -19,10 +19,13 @@ Arduino_RGB_Display *gfx = new Arduino_RGB_Display(800, 480, rgbpanel, 0, true);
 HardwareSerial InterSerial(0);
 
 // ─── Protocole trame inter-ESP ────────────────────────────
-#define FRAME_SYNC1   0xAA
-#define FRAME_SYNC2   0x55
-#define FRAME_TYPE_RB 0x01
-#define FRAME_LEN     12
+#define FRAME_SYNC1    0xAA
+#define FRAME_SYNC2    0x55
+#define FRAME_TYPE_RB  0x01
+#define FRAME_TYPE_OBD 0x02
+#define FRAME_LEN_RB   12
+#define FRAME_LEN_OBD  22
+#define FRAME_MAX_LEN  22
 
 struct __attribute__((packed)) UARTFrame {
     uint8_t  sync1, sync2, type;
@@ -30,6 +33,22 @@ struct __attribute__((packed)) UARTFrame {
     int16_t  gxX1000;
     int16_t  gyX1000;
     uint8_t  fix, svs, crc;
+};
+
+struct __attribute__((packed)) OBDFrameExt {
+    uint8_t  sync1, sync2, type;
+    uint16_t rpm;
+    int16_t  coolant;
+    int16_t  intakeTemp;
+    uint16_t batteryMV;
+    uint16_t afr;
+    uint8_t  load;
+    uint8_t  fuel;
+    int8_t   timing;
+    uint8_t  mil;
+    int16_t  oilTemp;
+    uint8_t  speed;
+    uint8_t  crc;
 };
 
 // ─── RaceBox BLE ──────────────────────────────────────────
@@ -53,6 +72,126 @@ volatile bool doScan       = true;
 
 NimBLEAdvertisedDevice* advDevice = nullptr;
 
+// ─── Données OBD (reçues du GT86 via UART) ───────────────
+struct OBDData {
+    uint16_t rpm       = 0;
+    int16_t  coolant   = 0;
+    int16_t  intakeTemp = 0;
+    uint16_t batteryMV = 0;
+    uint16_t afr       = 0;   // ×100
+    uint8_t  load      = 0;
+    uint8_t  fuel      = 0;
+    int8_t   timing    = 0;
+    uint8_t  mil       = 0;   // bit7=MIL, 0-6=DTC
+    int16_t  oilTemp   = -999;
+    uint8_t  speed     = 0;
+};
+OBDData       obd;
+volatile bool obdFresh = false;
+
+// ─── Alertes popup ───────────────────────────────────────
+uint32_t alertStart  = 0;
+uint8_t  alertActive = 0;  // 0=rien, 1=MIL, 2=temp eau, 3=huile, 4=batterie
+
+void showAlert(const char* line1, const char* line2, uint16_t bgColor) {
+    gfx->fillRect(100, 150, 600, 180, bgColor);
+    gfx->drawRect(100, 150, 600, 180, WHITE);
+    gfx->setTextColor(WHITE);
+    gfx->setTextSize(4);
+    int w1 = strlen(line1) * 24;
+    gfx->setCursor((800 - w1) / 2, 180);
+    gfx->print(line1);
+    gfx->setTextSize(2);
+    int w2 = strlen(line2) * 12;
+    gfx->setCursor((800 - w2) / 2, 250);
+    gfx->print(line2);
+    alertStart = millis();
+}
+
+void checkAlerts() {
+    // Effacer alerte après 5 secondes (le loop fera le redraw)
+    if (alertActive && millis() - alertStart > 5000) {
+        alertActive = 0;
+        return;  // le loop détectera alertActive=0 et redessinera
+    }
+
+    // MIL (check engine)
+    if ((obd.mil & 0x80) && alertActive != 1) {
+        uint8_t dtcCount = obd.mil & 0x7F;
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%d defaut(s)", dtcCount);
+        showAlert("CHECK ENGINE", buf, 0xF800);
+        alertActive = 1;
+    }
+    // Temp eau > 105°C
+    else if (obd.coolant > 105 && alertActive != 2) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "EAU: %d C", obd.coolant);
+        showAlert("TEMP HAUTE!", buf, 0xF800);
+        alertActive = 2;
+    }
+    // Huile > 130°C
+    else if (obd.oilTemp > 130 && obd.oilTemp != -999 && alertActive != 3) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "HUILE: %d C", obd.oilTemp);
+        showAlert("HUILE CHAUDE!", buf, 0xFD20);
+        alertActive = 3;
+    }
+    // Batterie < 12.0V
+    else if (obd.batteryMV > 0 && obd.batteryMV < 12000 && alertActive != 4) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%.1fV", obd.batteryMV / 1000.0f);
+        showAlert("TENSION BASSE", buf, 0xFD20);
+        alertActive = 4;
+    }
+}
+
+// ─── Parser UART multi-trame ─────────────────────────────
+uint8_t uartBuf[FRAME_MAX_LEN];
+uint8_t uartPos = 0;
+int     uartExpected = 0;
+
+void processUART() {
+    while (InterSerial.available()) {
+        uint8_t b = InterSerial.read();
+        if (uartPos == 0) {
+            if (b == FRAME_SYNC1) uartBuf[uartPos++] = b;
+        } else if (uartPos == 1) {
+            if (b == FRAME_SYNC2) uartBuf[uartPos++] = b;
+            else uartPos = 0;
+        } else if (uartPos == 2) {
+            uartBuf[uartPos++] = b;
+            if (b == FRAME_TYPE_RB)       uartExpected = FRAME_LEN_RB;
+            else if (b == FRAME_TYPE_OBD) uartExpected = FRAME_LEN_OBD;
+            else uartPos = 0;
+        } else {
+            uartBuf[uartPos++] = b;
+            if (uartPos == uartExpected) {
+                uartPos = 0;
+                uint8_t crc = 0;
+                for (int i = 2; i < uartExpected - 1; i++) crc ^= uartBuf[i];
+                if (crc != uartBuf[uartExpected - 1]) continue;
+
+                if (uartBuf[2] == FRAME_TYPE_OBD) {
+                    OBDFrameExt* f = (OBDFrameExt*)uartBuf;
+                    obd.rpm       = f->rpm;
+                    obd.coolant   = f->coolant;
+                    obd.intakeTemp = f->intakeTemp;
+                    obd.batteryMV = f->batteryMV;
+                    obd.afr       = f->afr;
+                    obd.load      = f->load;
+                    obd.fuel      = f->fuel;
+                    obd.timing    = f->timing;
+                    obd.mil       = f->mil;
+                    obd.oilTemp   = f->oilTemp;
+                    obd.speed     = f->speed;
+                    obdFresh = true;
+                }
+            }
+        }
+    }
+}
+
 // ─── Envoi trame UART ─────────────────────────────────────
 void sendUARTFrame() {
     UARTFrame f;
@@ -66,9 +205,9 @@ void sendUARTFrame() {
     f.svs      = rb.svs;
     uint8_t crc = 0;
     const uint8_t* p = (const uint8_t*)&f;
-    for (int i = 2; i < FRAME_LEN - 1; i++) crc ^= p[i];
+    for (int i = 2; i < FRAME_LEN_RB - 1; i++) crc ^= p[i];
     f.crc = crc;
-    InterSerial.write((const uint8_t*)&f, FRAME_LEN);
+    InterSerial.write((const uint8_t*)&f, FRAME_LEN_RB);
 }
 
 // ─── Scan debug ───────────────────────────────────────────
@@ -173,6 +312,78 @@ void drawBackground() {
 
     gfx->setTextColor(0x4208); gfx->setTextSize(2);
     gfx->setCursor(170, 400); gfx->print("km/h");
+
+    // Fond barre RPM (y=440 à y=472)
+    gfx->drawRect(10, 440, 780, 32, 0x2945);
+}
+
+// ─── Barre RPM + température (données OBD) ───────────────
+#define RPM_MAX 7500
+uint16_t prevRpmBar = 0;
+int16_t  prevCoolS3 = -999;
+
+void drawRpmBar() {
+    if (obd.rpm == prevRpmBar) return;
+    prevRpmBar = obd.rpm;
+
+    int barW = (int)((float)obd.rpm / RPM_MAX * 776);
+    if (barW > 776) barW = 776;
+
+    // Couleur par zone RPM
+    uint16_t col;
+    if (obd.rpm > 6500)      col = 0xF800;  // rouge
+    else if (obd.rpm > 5000) col = 0xFD20;  // orange
+    else                     col = 0x07E0;  // vert
+
+    gfx->fillRect(12, 442, barW, 28, col);
+    gfx->fillRect(12 + barW, 442, 776 - barW, 28, BLACK);
+
+    // Texte RPM au centre de la barre
+    gfx->setTextSize(2);
+    gfx->setTextColor(WHITE);
+    char buf[10];
+    snprintf(buf, sizeof(buf), "%d", obd.rpm);
+    int w = strlen(buf) * 12;
+    gfx->setCursor((800 - w) / 2, 446);
+    gfx->print(buf);
+}
+
+void drawOBDInfo() {
+    // Zone info OBD : panneau droit, au-dessus du cercle G-force
+    gfx->fillRect(460, 4, 340, 38, BLACK);
+    gfx->setTextSize(2);
+
+    // Temp eau
+    uint16_t col = obd.coolant > 100 ? 0xF800 : (obd.coolant > 90 ? 0xFD20 : WHITE);
+    gfx->setTextColor(col);
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%d%cC", obd.coolant, 0xF7);
+    gfx->setCursor(465, 12);
+    gfx->print(buf);
+
+    // Batterie
+    if (obd.batteryMV > 0) {
+        uint16_t bCol = obd.batteryMV < 12000 ? 0xF800 : WHITE;
+        gfx->setTextColor(bCol);
+        snprintf(buf, sizeof(buf), "%.1fV", obd.batteryMV / 1000.0f);
+        gfx->setCursor(560, 12);
+        gfx->print(buf);
+    }
+
+    // Fuel
+    if (obd.fuel > 0) {
+        gfx->setTextColor(obd.fuel < 15 ? 0xFD20 : WHITE);
+        snprintf(buf, sizeof(buf), "%d%%", obd.fuel);
+        gfx->setCursor(680, 12);
+        gfx->print(buf);
+    }
+
+    // MIL indicator
+    if (obd.mil & 0x80) {
+        gfx->setTextColor(0xF800);
+        gfx->setCursor(740, 12);
+        gfx->print("MIL");
+    }
 }
 
 // Valeurs précédentes pour affichage différentiel
@@ -313,12 +524,22 @@ void loop() {
         scanDirty = false;
         drawScanList();
     }
+    processUART();  // reçoit trames OBD du GT86
+
     if (rbFresh && millis() - lastDraw >= 40) {
         rbFresh  = false;
         lastDraw = millis();
         drawSpeed();
         drawGForce();
         drawStatusBar();
+    }
+    if (obdFresh) {
+        obdFresh = false;
+        if (!alertActive) {
+            drawRpmBar();
+            drawOBDInfo();
+        }
+        checkAlerts();
     }
     if (bleConnected && millis() - lastUART >= 100) {  // 10 Hz vers GT86
         lastUART = millis();
