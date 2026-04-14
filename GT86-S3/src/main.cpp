@@ -63,13 +63,13 @@ int obdAvail(){return(bleHead-bleTail+BLE_BUF_SIZE)%BLE_BUF_SIZE;}
 int obdRead(){if(bleHead==bleTail)return -1;uint8_t b=bleBuf[bleTail];bleTail=(bleTail+1)%BLE_BUF_SIZE;return b;}
 
 // OBD data
-uint16_t obdRpm=0; int16_t obdCoolant=0;
+uint16_t obdRpm=0; int16_t obdCoolant=0; uint8_t obdMIL=0;
 bool obdFresh=false;
 
 // PID round-robin
 struct PIDDef{const char*cmd;uint8_t pid;uint8_t bytes;};
-const PIDDef pidList[]={{"010C\r",0x0C,2},{"0105\r",0x05,1},{"010C\r",0x0C,2}};
-#define PID_COUNT 3
+const PIDDef pidList[]={{"010C\r",0x0C,2},{"0105\r",0x05,1},{"010C\r",0x0C,2},{"0101\r",0x01,4}};
+#define PID_COUNT 4
 int currentPID=0;bool queryPending=false;uint32_t queryStart=0;String obdResp="";
 
 bool parseOBDHex(const String&r,uint8_t pid,uint8_t*d,int c){
@@ -80,7 +80,7 @@ bool parseOBDHex(const String&r,uint8_t pid,uint8_t*d,int c){
 }
 void applyPIDValue(){uint8_t d[4];uint8_t pid=pidList[currentPID].pid;
     if(!parseOBDHex(obdResp,pid,d,pidList[currentPID].bytes))return;
-    switch(pid){case 0x0C:obdRpm=(d[0]*256+d[1])/4;break;case 0x05:obdCoolant=(int16_t)d[0]-40;break;}
+    switch(pid){case 0x0C:obdRpm=(d[0]*256+d[1])/4;break;case 0x05:obdCoolant=(int16_t)d[0]-40;break;case 0x01:obdMIL=d[0];break;}
     obdFresh=true;}
 void processOBD(){if(!obdConnected||!obdWriteChar)return;
     while(obdAvail()){char c=obdRead();
@@ -263,8 +263,11 @@ void drawStatus(){
     gfx->setCursor(290,380);gfx->print(rbFix>=3?"3D":"--");
     gfx->setTextColor(obdConnected?(uint16_t)0x07E0:(uint16_t)0xF800);
     gfx->setCursor(355,380);gfx->print(obdConnected?"OBD":"---");
-    gfx->setTextColor(0x4208);gfx->setCursor(430,380);
-    char sv[8];snprintf(sv,8,"%dSV",rbSvs);gfx->print(sv);
+    // MIL + Batterie
+    bool milOn=obdMIL&0x80;
+    gfx->setTextColor(milOn?0xF800:0x07E0);
+    gfx->setCursor(420,380);
+    gfx->print(milOn?"MIL!":"MIL");
 }
 
 // Placeholders chrono (panneau gauche)
@@ -297,7 +300,23 @@ void loop(){
     processUART();processOBD();
     if(rbFresh&&millis()-lastDraw>=40){rbFresh=false;lastDraw=millis();
         drawGear();drawSpeed();drawGForce();}
-    if(obdFresh){obdFresh=false;drawRpmLedBar();drawCoolant();}
+    if(obdFresh){obdFresh=false;drawRpmLedBar();drawCoolant();
+        // MIL check — alerte si voyant moteur allumé
+        static bool milShown=false;
+        bool milOn=obdMIL&0x80;
+        if(milOn&&!milShown){
+            gfx->fillRect(150,180,500,120,0xF800);
+            gfx->drawRect(150,180,500,120,WHITE);
+            gfx->setTextSize(4);gfx->setTextColor(WHITE);
+            gfx->setCursor(180,200);gfx->print("CHECK ENGINE");
+            gfx->setTextSize(2);
+            char buf[20];snprintf(buf,20,"%d defaut(s)",obdMIL&0x7F);
+            gfx->setCursor(280,260);gfx->print(buf);
+            milShown=true;
+        } else if(!milOn&&milShown){
+            milShown=false;drawBackground();drawChronoPlaceholders();prevCool=-999;prevRpmLed=0;prevSpd=-1;prevGear=-1;
+        }
+    }
     if(millis()-lastStatus>=2000){lastStatus=millis();
         bool live=(millis()-lastRbRx)<2000;
         if(live!=prevLive||obdConnected!=prevObdOk){drawStatus();prevLive=live;prevObdOk=obdConnected;}}
