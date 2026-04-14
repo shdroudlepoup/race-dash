@@ -13,9 +13,12 @@ TFT_eSPI tft = TFT_eSPI();
 #define FRAME_SYNC1    0xAA
 #define FRAME_SYNC2    0x55
 #define FRAME_TYPE_RB  0x01
+#define FRAME_TYPE_OBD 0x02
 #define FRAME_TYPE_LAP 0x03
 #define FRAME_LEN_RB   12
+#define FRAME_LEN_OBD  10
 #define FRAME_LEN_LAP  18
+#define FRAME_MAX_RX   12  // max frame we receive (OBD=10)
 
 struct __attribute__((packed)) UARTFrame {
     uint8_t  sync1, sync2, type;
@@ -33,6 +36,41 @@ struct __attribute__((packed)) LapFrame {
     uint8_t  flags;   // bit0=gateSet
     uint8_t  crc;
 };
+
+// ─── OBD data (reçu du S3 via UART) ──────────────────────
+uint16_t rxRpm = 0;
+int16_t  rxCoolant = 0;
+uint8_t  rxMIL = 0;
+bool     rxOBDFresh = false;
+
+// ─── Réception UART du S3 ────────────────────────────────
+uint8_t rxBufU[12]; uint8_t rxPosU=0; int rxExpected=0;
+
+void processUARTRx() {
+    while (Serial2.available()) {
+        uint8_t b = Serial2.read();
+        if (rxPosU==0) { if(b==FRAME_SYNC1) rxBufU[rxPosU++]=b; }
+        else if (rxPosU==1) { if(b==FRAME_SYNC2) rxBufU[rxPosU++]=b; else rxPosU=0; }
+        else if (rxPosU==2) {
+            rxBufU[rxPosU++]=b;
+            if (b==FRAME_TYPE_OBD) rxExpected=FRAME_LEN_OBD;
+            else rxPosU=0;  // on ne reçoit que OBD du S3
+        } else {
+            rxBufU[rxPosU++]=b;
+            if (rxPosU==rxExpected) {
+                rxPosU=0;
+                uint8_t crc=0;
+                for(int i=2;i<rxExpected-1;i++) crc^=rxBufU[i];
+                if(crc==rxBufU[rxExpected-1]) {
+                    rxRpm = rxBufU[3]|(uint16_t)rxBufU[4]<<8;
+                    rxCoolant = (int16_t)(rxBufU[5]|(uint16_t)rxBufU[6]<<8);
+                    rxMIL = rxBufU[7];
+                    rxOBDFresh = true;
+                }
+            }
+        }
+    }
+}
 
 // ─── Boutons ──────────────────────────────────────────────
 #define BTN_SET   13   // Placer la ligne
@@ -256,6 +294,43 @@ void drawButtonDebug() {
     tft.printf("B1:%d B2:%d B3:%d", digitalRead(BTN_SET), digitalRead(BTN_RESET), digitalRead(27));
 }
 
+int prevRxCool = -999;
+int prevRxRpm = -1;
+
+bool obdReceived = false;
+
+void drawOBDInfo() {
+    obdReceived = true;
+    // Temp eau en bas à gauche (dans le cercle)
+    if (rxCoolant != prevRxCool) {
+        prevRxCool = rxCoolant;
+        tft.fillRect(30, 170, 80, 18, TFT_BLACK);
+        tft.setTextSize(2);
+        uint16_t col = rxCoolant > 100 ? TFT_RED : (rxCoolant > 90 ? TFT_ORANGE : TFT_GREEN);
+        tft.setTextColor(col, TFT_BLACK);
+        char buf[8]; snprintf(buf, 8, "%d\xF7""C", rxCoolant);
+        tft.setCursor(35, 172);
+        tft.print(buf);
+    }
+    // RPM en bas à droite
+    if ((int)rxRpm != prevRxRpm) {
+        prevRxRpm = rxRpm;
+        tft.fillRect(130, 170, 80, 18, TFT_BLACK);
+        tft.setTextSize(2);
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        char buf[8]; snprintf(buf, 8, "%d", rxRpm);
+        tft.setCursor(135, 172);
+        tft.print(buf);
+    }
+}
+
+void drawOBDDefaults() {
+    tft.setTextSize(2);
+    tft.setTextColor(0x4208, TFT_BLACK);
+    tft.setCursor(35, 172); tft.print("--\xF7""C");
+    tft.setCursor(135, 172); tft.print("----");
+}
+
 void drawBottom() {
     tft.fillRect(30,185,180,35,TFT_BLACK);
     int spd=(int)(rb.speedKmh+0.5f);
@@ -295,6 +370,7 @@ void setup() {
     tft.setTextSize(2); tft.setTextColor(TFT_WHITE,TFT_BLACK);
     tft.setCursor(84,40); tft.print("GT86");
     drawGForceGrid();
+    drawOBDDefaults();
     drawBottom();
 
     NimBLEDevice::init("GT86");
@@ -313,12 +389,14 @@ void loop() {
         NimBLEDevice::getScan()->start(30, onScanEnded); }
 
     handleButtons();
+    processUARTRx();
 
     if (rbFresh && millis()-lastDraw>=40) {
         rbFresh=false; lastDraw=millis();
         checkLapCrossing();
         updateDisplay();
     }
+    if (rxOBDFresh) { rxOBDFresh=false; drawOBDInfo(); }
     // RaceBox → S3 à 10Hz
     if (bleConnected && millis()-lastUART>=100) {
         lastUART=millis(); sendRBFrame();

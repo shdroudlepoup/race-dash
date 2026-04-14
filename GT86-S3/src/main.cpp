@@ -19,10 +19,21 @@ HardwareSerial InterSerial(0);
 #define FRAME_SYNC1 0xAA
 #define FRAME_SYNC2 0x55
 #define FRAME_TYPE_RB 0x01
+#define FRAME_TYPE_OBD 0x02
 #define FRAME_TYPE_LAP 0x03
 #define FRAME_LEN_RB 12
+#define FRAME_LEN_OBD 10
 #define FRAME_LEN_LAP 18
 #define FRAME_MAX 18
+
+struct __attribute__((packed)) OBDMiniFrame {
+    uint8_t  sync1, sync2, type;
+    uint16_t rpm;
+    int16_t  coolant;
+    uint8_t  mil;
+    uint8_t  pad;
+    uint8_t  crc;
+};
 
 // ─── RaceBox (du Wroom via UART) ─────────────────────────
 float rbSpeed=0, rbGx=0, rbGy=0;
@@ -376,14 +387,25 @@ void setup(){
     BLEDevice::init("");
 }
 
-uint32_t lastDraw=0,lastStatus=0,lastOBDRetry=0;
+uint32_t lastDraw=0,lastStatus=0,lastOBDRetry=0,lastOBDSend=0;
 bool prevLive=false,prevObdOk=false;
+
+void sendOBDToWroom() {
+    OBDMiniFrame f;
+    f.sync1=FRAME_SYNC1; f.sync2=FRAME_SYNC2; f.type=FRAME_TYPE_OBD;
+    f.rpm=obdRpm; f.coolant=obdCoolant; f.mil=obdMIL; f.pad=0;
+    uint8_t crc=0; for(int i=2;i<FRAME_LEN_OBD-1;i++) crc^=((uint8_t*)&f)[i];
+    f.crc=crc;
+    InterSerial.write((const uint8_t*)&f, FRAME_LEN_OBD);
+}
 
 void loop(){
     processUART();processOBD();
     if(rbFresh&&millis()-lastDraw>=40){rbFresh=false;lastDraw=millis();
         drawGear();drawSpeed();drawGForce();}
     if(lapFresh){lapFresh=false;drawChrono();}
+    // Envoyer OBD au Wroom à 2Hz
+    if(obdConnected&&millis()-lastOBDSend>=500){lastOBDSend=millis();sendOBDToWroom();}
     if(obdFresh){obdFresh=false;drawRpmLedBar();drawCoolant();
         // MIL check — alerte si voyant moteur allumé
         static bool milShown=false;
