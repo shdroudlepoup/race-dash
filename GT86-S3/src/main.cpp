@@ -4,7 +4,7 @@
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 
-// ─── Display Waveshare ESP32-S3-Touch-LCD-7 ───────────────
+// ─── Display ──────────────────────────────────────────────
 Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
      5,  3, 46,  7,
      1,  2, 42, 41, 40,
@@ -14,372 +14,293 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
 );
 Arduino_RGB_Display *gfx = new Arduino_RGB_Display(800, 480, rgbpanel, 0, true);
 
-// ─── UART inter-ESP (switch Waveshare en UART2) ───────────
-#define UART_BAUD  115200
-#define INTER_TX   43
-#define INTER_RX   44
+// ─── UART ─────────────────────────────────────────────────
 HardwareSerial InterSerial(0);
+#define FRAME_SYNC1 0xAA
+#define FRAME_SYNC2 0x55
+#define FRAME_TYPE_RB 0x01
+#define FRAME_LEN_RB 12
 
-// ─── Protocole trame UART ─────────────────────────────────
-#define FRAME_SYNC1    0xAA
-#define FRAME_SYNC2    0x55
-#define FRAME_TYPE_RB  0x01
-#define FRAME_LEN_RB   12
+// ─── RaceBox (du Wroom via UART) ─────────────────────────
+float rbSpeed=0, rbGx=0, rbGy=0;
+uint8_t rbFix=0, rbSvs=0;
+bool rbFresh=false;
+uint32_t lastRbRx=0;
 
-// ─── Données RaceBox (reçues du Wroom via UART) ──────────
-float   rbSpeed = 0;
-float   rbGx = 0, rbGy = 0;
-uint8_t rbFix = 0, rbSvs = 0;
-bool    rbFresh = false;
-uint32_t lastRbRx = 0;
-
-// ─── Parser UART ─────────────────────────────────────────
-uint8_t uartBuf[FRAME_LEN_RB];
-uint8_t uartPos = 0;
-
+uint8_t uartBuf[FRAME_LEN_RB]; uint8_t uartPos=0;
 void processUART() {
-    while (InterSerial.available()) {
-        uint8_t b = InterSerial.read();
-        if (uartPos == 0) {
-            if (b == FRAME_SYNC1) uartBuf[uartPos++] = b;
-        } else if (uartPos == 1) {
-            if (b == FRAME_SYNC2) uartBuf[uartPos++] = b;
-            else uartPos = 0;
-        } else {
-            uartBuf[uartPos++] = b;
-            if (uartPos == FRAME_LEN_RB) {
-                uartPos = 0;
-                uint8_t crc = 0;
-                for (int i = 2; i < FRAME_LEN_RB - 1; i++) crc ^= uartBuf[i];
-                if (crc != uartBuf[FRAME_LEN_RB - 1]) continue;
-                if (uartBuf[2] == FRAME_TYPE_RB) {
-                    rbSpeed = ((uint16_t)(uartBuf[3] | uartBuf[4] << 8)) / 10.0f;
-                    rbGx = (int16_t)(uartBuf[5] | uartBuf[6] << 8) / 1000.0f;
-                    rbGy = (int16_t)(uartBuf[7] | uartBuf[8] << 8) / 1000.0f;
-                    rbFix = uartBuf[9];
-                    rbSvs = uartBuf[10];
-                    rbFresh = true;
-                    lastRbRx = millis();
-                }
-            }
-        }
+    while(InterSerial.available()) {
+        uint8_t b=InterSerial.read();
+        if(uartPos==0){if(b==FRAME_SYNC1)uartBuf[uartPos++]=b;}
+        else if(uartPos==1){if(b==FRAME_SYNC2)uartBuf[uartPos++]=b;else uartPos=0;}
+        else{uartBuf[uartPos++]=b;
+            if(uartPos==FRAME_LEN_RB){uartPos=0;uint8_t crc=0;
+                for(int i=2;i<FRAME_LEN_RB-1;i++)crc^=uartBuf[i];
+                if(crc==uartBuf[FRAME_LEN_RB-1]&&uartBuf[2]==FRAME_TYPE_RB){
+                    rbSpeed=((uint16_t)(uartBuf[3]|uartBuf[4]<<8))/10.0f;
+                    rbGx=(int16_t)(uartBuf[5]|uartBuf[6]<<8)/1000.0f;
+                    rbGy=(int16_t)(uartBuf[7]|uartBuf[8]<<8)/1000.0f;
+                    rbFix=uartBuf[9];rbSvs=uartBuf[10];
+                    rbFresh=true;lastRbRx=millis();}}}
     }
 }
 
 // ─── OBD BLE (Bluedroid) ─────────────────────────────────
 #define OBD_BLE_NAME "Vlink"
-
 #define BLE_BUF_SIZE 512
 static uint8_t bleBuf[BLE_BUF_SIZE];
-static volatile int bleHead = 0, bleTail = 0;
-static BLERemoteCharacteristic* obdNotifyChar = nullptr;
-static BLERemoteCharacteristic* obdWriteChar  = nullptr;
-static BLEClient* obdClient = nullptr;
-bool obdConnected = false;
+static volatile int bleHead=0, bleTail=0;
+static BLERemoteCharacteristic* obdNotifyChar=nullptr;
+static BLERemoteCharacteristic* obdWriteChar=nullptr;
+static BLEClient* obdClient=nullptr;
+bool obdConnected=false;
 
 static void obdNotifyCB(BLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
-    for (size_t i = 0; i < len; i++) {
-        int next = (bleHead + 1) % BLE_BUF_SIZE;
-        if (next != bleTail) { bleBuf[bleHead] = data[i]; bleHead = next; }
-    }
+    for(size_t i=0;i<len;i++){int next=(bleHead+1)%BLE_BUF_SIZE;
+    if(next!=bleTail){bleBuf[bleHead]=data[i];bleHead=next;}}
 }
-
-int obdAvail() { return (bleHead - bleTail + BLE_BUF_SIZE) % BLE_BUF_SIZE; }
-int obdRead()  { if (bleHead == bleTail) return -1; uint8_t b = bleBuf[bleTail]; bleTail = (bleTail+1) % BLE_BUF_SIZE; return b; }
+int obdAvail(){return(bleHead-bleTail+BLE_BUF_SIZE)%BLE_BUF_SIZE;}
+int obdRead(){if(bleHead==bleTail)return -1;uint8_t b=bleBuf[bleTail];bleTail=(bleTail+1)%BLE_BUF_SIZE;return b;}
 
 // OBD data
-uint16_t obdRpm = 0;
-int16_t  obdCoolant = 0;
-bool     obdFresh = false;
+uint16_t obdRpm=0; int16_t obdCoolant=0;
+bool obdFresh=false;
 
 // PID round-robin
-struct PIDDef { const char* cmd; uint8_t pid; uint8_t bytes; };
-const PIDDef pidList[] = {
-    {"010C\r", 0x0C, 2},  // RPM
-    {"0105\r", 0x05, 1},  // Coolant
-    {"010C\r", 0x0C, 2},  // RPM (2x)
-};
+struct PIDDef{const char*cmd;uint8_t pid;uint8_t bytes;};
+const PIDDef pidList[]={{"010C\r",0x0C,2},{"0105\r",0x05,1},{"010C\r",0x0C,2}};
 #define PID_COUNT 3
-int currentPID = 0;
-bool queryPending = false;
-uint32_t queryStart = 0;
-String obdResp = "";
+int currentPID=0;bool queryPending=false;uint32_t queryStart=0;String obdResp="";
 
-bool parseOBDHex(const String& resp, uint8_t pid, uint8_t* data, int count) {
-    char prefix[8]; snprintf(prefix, 8, "41%02X", pid);
-    String clean = resp; clean.replace(" ", "");
-    int idx = clean.indexOf(prefix); if (idx < 0) return false; idx += 4;
-    for (int i = 0; i < count; i++) {
-        if (idx + 2 > (int)clean.length()) return false;
-        data[i] = strtol(clean.substring(idx, idx+2).c_str(), NULL, 16); idx += 2;
-    }
-    return true;
+bool parseOBDHex(const String&r,uint8_t pid,uint8_t*d,int c){
+    char pf[8];snprintf(pf,8,"41%02X",pid);String cl=r;cl.replace(" ","");
+    int idx=cl.indexOf(pf);if(idx<0)return false;idx+=4;
+    for(int i=0;i<c;i++){if(idx+2>(int)cl.length())return false;
+    d[i]=strtol(cl.substring(idx,idx+2).c_str(),NULL,16);idx+=2;}return true;
+}
+void applyPIDValue(){uint8_t d[4];uint8_t pid=pidList[currentPID].pid;
+    if(!parseOBDHex(obdResp,pid,d,pidList[currentPID].bytes))return;
+    switch(pid){case 0x0C:obdRpm=(d[0]*256+d[1])/4;break;case 0x05:obdCoolant=(int16_t)d[0]-40;break;}
+    obdFresh=true;}
+void processOBD(){if(!obdConnected||!obdWriteChar)return;
+    while(obdAvail()){char c=obdRead();
+        if(c=='>'){if(queryPending){applyPIDValue();queryPending=false;currentPID=(currentPID+1)%PID_COUNT;}obdResp="";}
+        else if(c>=0x20&&c<=0x7E)obdResp+=c;}
+    if(!queryPending&&millis()-queryStart>=50){queryStart=millis();bleHead=bleTail=0;obdResp="";
+        obdWriteChar->writeValue((uint8_t*)pidList[currentPID].cmd,strlen(pidList[currentPID].cmd));queryPending=true;}
+    if(queryPending&&millis()-queryStart>5000){queryPending=false;obdResp="";currentPID=(currentPID+1)%PID_COUNT;}
 }
 
-void applyPIDValue() {
-    uint8_t data[4]; uint8_t pid = pidList[currentPID].pid;
-    if (!parseOBDHex(obdResp, pid, data, pidList[currentPID].bytes)) return;
-    switch (pid) {
-        case 0x0C: obdRpm = (data[0]*256 + data[1]) / 4; break;
-        case 0x05: obdCoolant = (int16_t)data[0] - 40; break;
-    }
-    obdFresh = true;
+bool scanAndConnectOBD(){
+    BLEDevice::deinit(false);delay(300);BLEDevice::init("");
+    bleHead=bleTail=0;obdNotifyChar=nullptr;obdWriteChar=nullptr;
+    if(obdClient){obdClient->disconnect();delete obdClient;obdClient=nullptr;}
+    BLEScan*pScan=BLEDevice::getScan();pScan->setActiveScan(true);
+    pScan->setInterval(100);pScan->setWindow(99);
+    BLEScanResults results=pScan->start(6,false);
+    BLEAdvertisedDevice*target=nullptr;
+    for(int i=0;i<results.getCount();i++){BLEAdvertisedDevice dev=results.getDevice(i);
+        if(String(dev.getName().c_str()).indexOf(OBD_BLE_NAME)>=0){target=new BLEAdvertisedDevice(dev);break;}}
+    pScan->clearResults();if(!target)return false;
+    obdClient=BLEDevice::createClient();
+    if(!obdClient->connect(target)){delete target;return false;}delete target;
+    auto*svcs=obdClient->getServices();
+    for(auto it=svcs->begin();it!=svcs->end()&&!obdWriteChar;++it){
+        auto*chars=it->second->getCharacteristics();
+        BLERemoteCharacteristic*nCh=nullptr,*wCh=nullptr;
+        for(auto cit=chars->begin();cit!=chars->end();++cit){auto*ch=cit->second;
+            if(ch->canNotify()&&!nCh)nCh=ch;if(ch->canWrite()&&!wCh)wCh=ch;}
+        if(nCh&&wCh){obdNotifyChar=nCh;obdWriteChar=wCh;}}
+    if(!obdNotifyChar||!obdWriteChar){obdClient->disconnect();return false;}
+    obdNotifyChar->registerForNotify(obdNotifyCB);delay(500);
+    const char*cmds[]={"ATI\r","ATE0\r","ATL0\r","ATSP0\r"};bool hasPrompt=false;
+    for(int c=0;c<4;c++){bleHead=bleTail=0;
+        obdWriteChar->writeValue((uint8_t*)cmds[c],strlen(cmds[c]));delay(1500);
+        while(obdAvail()){if(obdRead()=='>')hasPrompt=true;}}
+    if(!hasPrompt){obdClient->disconnect();return false;}
+    bleHead=bleTail=0;return true;
 }
 
-void processOBD() {
-    if (!obdConnected || !obdWriteChar) return;
-    while (obdAvail()) {
-        char c = obdRead();
-        if (c == '>') {
-            if (queryPending) { applyPIDValue(); queryPending = false; currentPID = (currentPID+1) % PID_COUNT; }
-            obdResp = "";
-        } else if (c >= 0x20 && c <= 0x7E) obdResp += c;
-    }
-    if (!queryPending && millis() - queryStart >= 50) {
-        queryStart = millis(); bleHead = bleTail = 0; obdResp = "";
-        obdWriteChar->writeValue((uint8_t*)pidList[currentPID].cmd, strlen(pidList[currentPID].cmd));
-        queryPending = true;
-    }
-    if (queryPending && millis() - queryStart > 5000) {
-        queryPending = false; obdResp = ""; currentPID = (currentPID+1) % PID_COUNT;
-    }
+// ─── Gear estimation (GT86 FA20 6MT) ─────────────────────
+const float gearRatios[]={3.626f,2.188f,1.541f,1.213f,1.000f,0.767f};
+const float finalDrive=4.1f, tireCirc=1.943f;
+int estimateGear(float spd,uint16_t rpm){
+    if(rpm<500||spd<3)return 0;
+    float factor=finalDrive*60.0f/(3.6f*tireCirc);
+    int best=0;float bestD=99999;
+    for(int g=0;g<6;g++){float exp=spd*gearRatios[g]*factor;float d=fabsf(exp-(float)rpm);
+        if(d<bestD){bestD=d;best=g+1;}}
+    if(bestD>rpm*0.20f)return 0;return best;
 }
+int currentGear=0,prevGear=-1;
 
-// ─── OBD scan + connexion (Bluedroid) ────────────────────
-bool scanAndConnectOBD() {
-    BLEDevice::deinit(false);
-    delay(300);
-    BLEDevice::init("");
+// ─── Layout (positions nettoyées, sans petits labels) ────
+#define RPM_MAX 7500
+#define RPM_SEGS 68
+#define RPM_SEGW 8
+#define RPM_SEGH 24
+#define RPM_GAP 1
+#define RPM_X 8
+#define RPM_Y 4
 
-    bleHead = bleTail = 0;
-    obdNotifyChar = nullptr; obdWriteChar = nullptr;
-    if (obdClient) { obdClient->disconnect(); delete obdClient; obdClient = nullptr; }
+#define GCX 660
+#define GCY 340
+#define GCR 90
+#define GSCALE 2.0f
+static int prevDotX=GCX,prevDotY=GCY;
 
-    BLEScan* pScan = BLEDevice::getScan();
-    pScan->setActiveScan(true);
-    pScan->setInterval(100);
-    pScan->setWindow(99);
-    BLEScanResults results = pScan->start(6, false);
-
-    // Trouver iCare
-    BLEAdvertisedDevice* target = nullptr;
-    for (int i = 0; i < results.getCount(); i++) {
-        BLEAdvertisedDevice dev = results.getDevice(i);
-        String name = String(dev.getName().c_str());
-        if (name.indexOf(OBD_BLE_NAME) >= 0) {
-            target = new BLEAdvertisedDevice(dev);
-            break;
-        }
-    }
-    pScan->clearResults();
-    if (!target) return false;
-
-    // Connexion
-    obdClient = BLEDevice::createClient();
-    if (!obdClient->connect(target)) { delete target; return false; }
-    delete target;
-
-    // Découverte services
-    auto* svcs = obdClient->getServices();
-    for (auto it = svcs->begin(); it != svcs->end() && !obdWriteChar; ++it) {
-        auto* chars = it->second->getCharacteristics();
-        BLERemoteCharacteristic *nCh = nullptr, *wCh = nullptr;
-        for (auto cit = chars->begin(); cit != chars->end(); ++cit) {
-            auto* ch = cit->second;
-            if (ch->canNotify() && !nCh) nCh = ch;
-            if (ch->canWrite() && !wCh) wCh = ch;
-        }
-        if (nCh && wCh) { obdNotifyChar = nCh; obdWriteChar = wCh; }
-    }
-    if (!obdNotifyChar || !obdWriteChar) { obdClient->disconnect(); return false; }
-
-    obdNotifyChar->registerForNotify(obdNotifyCB);
-    delay(500);
-
-    // Init AT (sans ATZ)
-    const char* cmds[] = {"ATI\r", "ATE0\r", "ATL0\r", "ATSP0\r"};
-    bool hasPrompt = false;
-    for (int c = 0; c < 4; c++) {
-        bleHead = bleTail = 0;
-        obdWriteChar->writeValue((uint8_t*)cmds[c], strlen(cmds[c]));
-        delay(1500);
-        while (obdAvail()) { if (obdRead() == '>') hasPrompt = true; }
-    }
-    if (!hasPrompt) { obdClient->disconnect(); return false; }
-
-    bleHead = bleTail = 0;
-    return true;
-}
-
-// ─── Layout display 800×480 ──────────────────────────────
-#define GCX   625
-#define GCY   255
-#define GCR   145
-#define GSCALE 2.5f
-static int prevDotX = GCX, prevDotY = GCY;
-
-void drawBackground() {
+void drawBackground(){
     gfx->fillScreen(BLACK);
-    gfx->fillRect(0, 0, 800, 4, 0xF800);
-    gfx->fillRect(0, 476, 800, 4, 0xF800);
-    gfx->drawFastVLine(455, 42, 430, 0x2945);
+
+    // RPM LED bar (segments éteints)
+    for(int i=0;i<RPM_SEGS;i++){
+        int x=RPM_X+i*(RPM_SEGW+RPM_GAP);
+        gfx->fillRect(x,RPM_Y,RPM_SEGW,RPM_SEGH,0x1082);
+    }
+    // Shift box
+    int shiftX=RPM_X+RPM_SEGS*(RPM_SEGW+RPM_GAP)+4;
+    gfx->drawRect(shiftX,RPM_Y,795-shiftX,RPM_SEGH,0x2945);
+
+    // Séparateurs
+    gfx->drawFastHLine(0,34,800,0x2945);
+    gfx->drawFastVLine(210,34,446,0x2945);
+    gfx->drawFastVLine(530,34,446,0x2945);
+    gfx->drawFastHLine(0,370,210,0x2945);
+
+    // Cadre gear
+    gfx->drawRect(240,44,260,250,0x2945);
 
     // G-force circle
-    gfx->drawCircle(GCX, GCY, GCR, 0x4208);
-    gfx->drawCircle(GCX, GCY, (int)(GCR / GSCALE), 0x2945);
-    gfx->drawFastHLine(GCX-GCR, GCY, GCR*2, 0x2945);
-    gfx->drawFastVLine(GCX, GCY-GCR, GCR*2, 0x2945);
-    gfx->setTextColor(0x4208); gfx->setTextSize(1);
-    gfx->setCursor(GCX+4, GCY-GCR-12); gfx->print("BRAKE");
-    gfx->setCursor(GCX+4, GCY+GCR+4);  gfx->print("ACCEL");
-    gfx->fillCircle(GCX, GCY, 13, 0x07E0);
-
-    gfx->setTextColor(0x4208); gfx->setTextSize(2);
-    gfx->setCursor(170, 400); gfx->print("km/h");
-
-    // RPM bar frame
-    gfx->drawRect(10, 440, 780, 32, 0x2945);
+    gfx->drawCircle(GCX,GCY,GCR,0x4208);
+    gfx->drawCircle(GCX,GCY,GCR/2,0x2945);
+    gfx->drawFastHLine(GCX-GCR,GCY,GCR*2,0x2945);
+    gfx->drawFastVLine(GCX,GCY-GCR,GCR*2,0x2945);
+    gfx->fillCircle(GCX,GCY,8,0x07E0);
 }
 
 // ─── Affichage différentiel ──────────────────────────────
-int prevSpd = -1;
-uint16_t prevRpmBar = 0;
-int16_t prevCoolS3 = -999;
-bool prevWroomLive = false;
-bool prevObdOk = false;
+int prevSpd=-1; uint16_t prevRpmLed=0; int16_t prevCool=-999;
 
-void drawStatusBar() {
-    gfx->fillRect(0, 4, 800, 38, BLACK);
+void drawRpmLedBar(){
+    if(obdRpm==prevRpmLed)return;prevRpmLed=obdRpm;
+    int lit=(int)((float)obdRpm/RPM_MAX*RPM_SEGS);
+    for(int i=0;i<RPM_SEGS;i++){
+        int x=RPM_X+i*(RPM_SEGW+RPM_GAP);
+        uint16_t col;
+        if(i<lit){float r=(float)i/RPM_SEGS;
+            col=r>0.85f?0xF800:(r>0.65f?0xFD20:(r>0.45f?0xFFE0:0x07E0));}
+        else col=0x1082;
+        gfx->fillRect(x,RPM_Y,RPM_SEGW,RPM_SEGH,col);}
+    bool shift=obdRpm>6800;
+    int sx=RPM_X+RPM_SEGS*(RPM_SEGW+RPM_GAP)+4;
+    gfx->fillRect(sx,RPM_Y,795-sx,RPM_SEGH,shift?0x001F:BLACK);
+    gfx->drawRect(sx,RPM_Y,795-sx,RPM_SEGH,shift?0x001F:0x2945);
+    gfx->setTextSize(2);gfx->setTextColor(shift?WHITE:0x2945);
+    gfx->setCursor(sx+6,RPM_Y+4);gfx->print("Shift");
+}
+
+void drawGear(){
+    currentGear=estimateGear(rbSpeed,obdRpm);
+    if(currentGear==prevGear)return;prevGear=currentGear;
+    gfx->fillRect(242,46,256,246,BLACK);
+    gfx->setTextSize(18);
+    const char*gs; uint16_t col=WHITE;
+    if(currentGear==0){gs="N";col=0x4208;}
+    else{static char gb[2];gb[0]='0'+currentGear;gb[1]=0;gs=gb;}
+    gfx->setTextColor(col);
+    gfx->setCursor(310,70);gfx->print(gs);
+}
+
+void drawSpeed(){
+    int spd=(int)(rbSpeed+0.5f);if(spd<0)spd=0;
+    if(spd==prevSpd)return;prevSpd=spd;
+    gfx->fillRect(215,300,310,60,BLACK);
+    uint8_t sz=5;int digits=spd<10?1:(spd<100?2:3);
+    int numW=digits*6*sz;int totalW=numW+65;
+    int startX=210+(320-totalW)/2;
+    gfx->setTextSize(sz);gfx->setTextColor(WHITE);
+    gfx->setCursor(startX,308);gfx->print(spd);
+    gfx->setTextSize(2);gfx->setTextColor(0x4208);
+    gfx->setCursor(startX+numW+5,318);gfx->print("km/h");
+}
+
+void drawCoolant(){
+    if(obdCoolant==prevCool)return;prevCool=obdCoolant;
+    gfx->fillRect(535,40,260,70,BLACK);
+    uint16_t col=obdCoolant>100?0xF800:(obdCoolant>90?0xFD20:0x07E0);
+    if(!obdConnected)col=0x4208;
+    gfx->setTextSize(4);gfx->setTextColor(col);
+    char buf[12];
+    if(obdConnected) snprintf(buf,12,"%d\xF7""C",obdCoolant);
+    else snprintf(buf,12,"--\xF7""C");
+    gfx->setCursor(570,50);gfx->print(buf);
+}
+
+void drawGForce(){
+    gfx->fillCircle(prevDotX,prevDotY,8,BLACK);
+    gfx->drawFastHLine(GCX-GCR,GCY,GCR*2,0x2945);
+    gfx->drawFastVLine(GCX,GCY-GCR,GCR*2,0x2945);
+    float nx=(rbGx/GSCALE)*GCR;float ny=(-rbGy/GSCALE)*GCR;
+    float dist=sqrtf(nx*nx+ny*ny);
+    if(dist>GCR){float s=GCR/dist;nx*=s;ny*=s;dist=GCR;}
+    prevDotX=GCX+(int)nx;prevDotY=GCY+(int)ny;
+    float mag=dist/GCR;
+    gfx->fillCircle(prevDotX,prevDotY,8,mag>0.8f?0xF800:(mag>0.4f?0xFD20:0x07E0));
+    // G values
+    gfx->fillRect(535,445,260,16,BLACK);
+    gfx->setTextSize(1);gfx->setTextColor(WHITE);
+    char buf[32];snprintf(buf,32,"G: %.1f LAT | %.1f LONG",fabsf(rbGx),fabsf(rbGy));
+    gfx->setCursor(545,448);gfx->print(buf);
+}
+
+void drawStatus(){
+    gfx->fillRect(215,375,310,30,BLACK);
     gfx->setTextSize(2);
-
-    // Wroom link
-    bool wroomLive = (millis() - lastRbRx) < 2000;
-    gfx->setCursor(8, 12);
-    gfx->setTextColor(wroomLive ? (uint16_t)0x07E0 : (uint16_t)0xF800);
-    gfx->print(wroomLive ? "RB OK" : "RB...");
-
-    // GPS fix
-    gfx->setCursor(140, 12);
-    gfx->setTextColor(rbFix >= 3 ? (uint16_t)0x07E0 : (uint16_t)0xF800);
-    const char* fixStr[] = {"NO FIX", "DEAD-R", "  2D  ", "  3D  "};
-    gfx->print(rbFix <= 3 ? fixStr[rbFix] : "  ??  ");
-
-    // SVs
-    gfx->setTextColor(WHITE);
-    gfx->setCursor(280, 12);
-    gfx->print(rbSvs); gfx->print("SV");
-
-    // OBD status
-    gfx->setCursor(370, 12);
-    gfx->setTextColor(obdConnected ? (uint16_t)0x07E0 : (uint16_t)0xF800);
-    gfx->print(obdConnected ? "OBD" : "---");
-
-    // Coolant
-    if (obdConnected) {
-        uint16_t col = obdCoolant > 100 ? 0xF800 : (obdCoolant > 90 ? 0xFD20 : WHITE);
-        gfx->setTextColor(col);
-        char buf[16]; snprintf(buf, 16, "EAU %d%cC", obdCoolant, 0xF7);
-        gfx->setCursor(465, 12); gfx->print(buf);
-    }
-
-    prevWroomLive = wroomLive;
-    prevObdOk = obdConnected;
+    bool live=(millis()-lastRbRx)<2000;
+    gfx->setTextColor(live?(uint16_t)0x07E0:(uint16_t)0xF800);
+    gfx->setCursor(230,380);gfx->print(live?"RB":"--");
+    gfx->setTextColor(rbFix>=3?(uint16_t)0x07E0:(uint16_t)0xF800);
+    gfx->setCursor(290,380);gfx->print(rbFix>=3?"3D":"--");
+    gfx->setTextColor(obdConnected?(uint16_t)0x07E0:(uint16_t)0xF800);
+    gfx->setCursor(355,380);gfx->print(obdConnected?"OBD":"---");
+    gfx->setTextColor(0x4208);gfx->setCursor(430,380);
+    char sv[8];snprintf(sv,8,"%dSV",rbSvs);gfx->print(sv);
 }
 
-void drawSpeed() {
-    int spd = (int)(rbSpeed + 0.5f);
-    if (spd < 0) spd = 0;
-    if (spd == prevSpd) return;
-    prevSpd = spd;
-
-    gfx->fillRect(10, 50, 435, 335, BLACK);
-    uint8_t sz; int x;
-    if (spd < 10)       { sz = 16; x = (455 - 1*6*16) / 2; }
-    else if (spd < 100) { sz = 16; x = (455 - 2*6*16) / 2; }
-    else                { sz = 12; x = (455 - 3*6*12) / 2; }
-    gfx->setTextSize(sz); gfx->setTextColor(WHITE);
-    gfx->setCursor(x > 0 ? x : 5, 115);
-    gfx->print(spd);
+// Placeholders chrono (panneau gauche)
+void drawChronoPlaceholders(){
+    gfx->setTextSize(2);gfx->setTextColor(WHITE);
+    gfx->setCursor(15,50);gfx->print("--:--.--");
+    gfx->setCursor(15,100);gfx->print("--:--.--");
+    gfx->setTextSize(4);gfx->setTextColor(0x4208);
+    gfx->setCursor(15,390);gfx->print("+0.00");
+    gfx->setTextSize(2);gfx->setTextColor(0x4208);
+    gfx->setCursor(215,445);gfx->print("FUEL: --L");
 }
 
-void drawGForce() {
-    gfx->fillCircle(prevDotX, prevDotY, 13, BLACK);
-    gfx->drawFastHLine(GCX-GCR, GCY, GCR*2, 0x2945);
-    gfx->drawFastVLine(GCX, GCY-GCR, GCR*2, 0x2945);
-
-    float nx = (rbGx / GSCALE) * GCR;
-    float ny = (-rbGy / GSCALE) * GCR;
-    float dist = sqrtf(nx*nx + ny*ny);
-    if (dist > GCR) { float s = GCR/dist; nx *= s; ny *= s; dist = GCR; }
-    prevDotX = GCX + (int)nx;
-    prevDotY = GCY + (int)ny;
-    float mag = dist / GCR;
-    uint16_t col = mag > 0.8f ? 0xF800 : (mag > 0.4f ? 0xFD20 : 0x07E0);
-    gfx->fillCircle(prevDotX, prevDotY, 13, col);
-}
-
-#define RPM_MAX 7500
-void drawRpmBar() {
-    if (obdRpm == prevRpmBar) return;
-    prevRpmBar = obdRpm;
-    int barW = (int)((float)obdRpm / RPM_MAX * 776);
-    if (barW > 776) barW = 776;
-    uint16_t col = obdRpm > 6500 ? 0xF800 : (obdRpm > 5000 ? 0xFD20 : 0x07E0);
-    gfx->fillRect(12, 442, barW, 28, col);
-    gfx->fillRect(12+barW, 442, 776-barW, 28, BLACK);
-    gfx->setTextSize(2); gfx->setTextColor(WHITE);
-    char buf[10]; snprintf(buf, 10, "%d", obdRpm);
-    int w = strlen(buf) * 12;
-    gfx->setCursor((800-w)/2, 446); gfx->print(buf);
-}
-
-// ─── Setup ────────────────────────────────────────────────
-void setup() {
+// ─── Setup & Loop ─────────────────────────────────────────
+void setup(){
     delay(500);
-    InterSerial.begin(UART_BAUD, SERIAL_8N1, INTER_RX, INTER_TX);
-
-    if (!gfx->begin()) return;
+    InterSerial.begin(115200,SERIAL_8N1,44,43);
+    if(!gfx->begin())return;
     drawBackground();
-    drawStatusBar();
-
-    // OBD BLE init (Bluedroid) — échouera sans iCare, c'est OK
+    drawChronoPlaceholders();
+    drawCoolant();
+    drawStatus();
     BLEDevice::init("");
 }
 
-// ─── Loop ─────────────────────────────────────────────────
-uint32_t lastDraw = 0, lastStatus = 0, lastOBDRetry = 0;
+uint32_t lastDraw=0,lastStatus=0,lastOBDRetry=0;
+bool prevLive=false,prevObdOk=false;
 
-void loop() {
-    processUART();
-    processOBD();
-
-    // Affichage RaceBox (données du Wroom via UART)
-    if (rbFresh && millis() - lastDraw >= 40) {
-        rbFresh = false;
-        lastDraw = millis();
-        drawSpeed();
-        drawGForce();
-    }
-
-    // Affichage OBD
-    if (obdFresh) {
-        obdFresh = false;
-        drawRpmBar();
-    }
-
-    // Status bar toutes les 2s
-    if (millis() - lastStatus >= 2000) {
-        lastStatus = millis();
-        bool wroomLive = (millis() - lastRbRx) < 2000;
-        if (wroomLive != prevWroomLive || obdConnected != prevObdOk) {
-            drawStatusBar();
-        }
-    }
-
-    // Retry OBD toutes les 15s si pas connecté
-    if (!obdConnected && millis() - lastOBDRetry >= 15000) {
-        lastOBDRetry = millis();
-        obdConnected = scanAndConnectOBD();
-        drawStatusBar();
-    }
+void loop(){
+    processUART();processOBD();
+    if(rbFresh&&millis()-lastDraw>=40){rbFresh=false;lastDraw=millis();
+        drawGear();drawSpeed();drawGForce();}
+    if(obdFresh){obdFresh=false;drawRpmLedBar();drawCoolant();}
+    if(millis()-lastStatus>=2000){lastStatus=millis();
+        bool live=(millis()-lastRbRx)<2000;
+        if(live!=prevLive||obdConnected!=prevObdOk){drawStatus();prevLive=live;prevObdOk=obdConnected;}}
+    if(!obdConnected&&millis()-lastOBDRetry>=15000){lastOBDRetry=millis();
+        obdConnected=scanAndConnectOBD();drawStatus();drawCoolant();}
 }
