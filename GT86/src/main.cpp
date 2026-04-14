@@ -192,6 +192,8 @@ void loadFromNVS() {
     }
 }
 
+void sendLapFrame();  // forward declaration
+
 void showBtnMsg(const char* msg, uint16_t col) {
     tft.fillRect(20, 55, 200, 16, TFT_BLACK);
     tft.setTextSize(1); tft.setTextColor(col, TFT_BLACK);
@@ -217,9 +219,10 @@ void handleButtons() {
         // Appui long > 2s → arrêter le chrono
         lastBtn = millis();
         gateSet = false;
+        sendLapFrame();  // notifier le S3 immédiatement
         showBtnMsg("CHRONO STOP", TFT_RED);
         Serial.println("[LAP] Chrono stopped");
-        btn1DownTime = millis() + 10000;  // empêcher re-trigger
+        btn1DownTime = millis() + 10000;
     }
     if (!btn1Down && btn1WasDown) {
         uint32_t held = millis() - btn1DownTime;
@@ -236,6 +239,7 @@ void handleButtons() {
             prevDist = 0;
             lastCrossTime = millis();
             saveGateToNVS();
+            sendLapFrame();  // notifier le S3 immédiatement
             if (rb.fix >= 3) showBtnMsg("LIGNE SAUVEE!", TFT_GREEN);
             else showBtnMsg("LIGNE (pas GPS)", TFT_ORANGE);
             Serial.printf("[LAP] Gate set+saved! fix=%d\n", rb.fix);

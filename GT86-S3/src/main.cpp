@@ -42,10 +42,12 @@ bool rbFresh=false;
 uint32_t lastRbRx=0;
 
 // ─── Lap data (du Wroom via UART) ────────────────────────
-uint32_t lapCurrentMs=0, lapBestMs=0, lapLastMs=0;
-uint8_t  lapNum=0;
+uint32_t lapBestMs=0, lapLastMs=0;
+uint8_t  lapNum=0, prevLapNum=255;
 bool     lapGateSet=false;
 bool     lapFresh=false;
+uint32_t lapLocalStart=0;  // timer local S3 pour affichage fluide
+bool     lapRunning=false;
 
 uint8_t uartBuf[FRAME_MAX]; uint8_t uartPos=0; int uartExpected=0;
 
@@ -75,11 +77,18 @@ void processUART() {
                     rbFresh=true;lastRbRx=millis();
                 }
                 else if(uartBuf[2]==FRAME_TYPE_LAP){
-                    lapCurrentMs=uartBuf[3]|(uint32_t)uartBuf[4]<<8|(uint32_t)uartBuf[5]<<16|(uint32_t)uartBuf[6]<<24;
+                    uint32_t rxCurMs=uartBuf[3]|(uint32_t)uartBuf[4]<<8|(uint32_t)uartBuf[5]<<16|(uint32_t)uartBuf[6]<<24;
                     lapBestMs=uartBuf[7]|(uint32_t)uartBuf[8]<<8|(uint32_t)uartBuf[9]<<16|(uint32_t)uartBuf[10]<<24;
                     lapLastMs=uartBuf[11]|(uint32_t)uartBuf[12]<<8|(uint32_t)uartBuf[13]<<16|(uint32_t)uartBuf[14]<<24;
                     lapNum=uartBuf[15];
                     lapGateSet=uartBuf[16]&1;
+                    // Sync timer local
+                    if (!lapGateSet) { lapRunning=false; }
+                    else if (lapNum!=prevLapNum || !lapRunning) {
+                        lapLocalStart=millis()-rxCurMs;  // sync avec le Wroom
+                        lapRunning=true;
+                    }
+                    prevLapNum=lapNum;
                     lapFresh=true;
                 }
             }
@@ -325,12 +334,13 @@ uint32_t prevLapCur=0xFFFFFFFF, prevLapBest=0xFFFFFFFF, prevLapLast=0xFFFFFFFF;
 int prevDelta=99999;
 
 void drawChrono() {
-    // Tour actuel (live)
+    // Tour actuel (live, calculé localement)
     gfx->fillRect(5, 42, 200, 55, BLACK);
     gfx->setTextSize(1); gfx->setTextColor(0x4208);
     gfx->setCursor(10, 44); gfx->print(lapGateSet ? "TOUR EN COURS:" : "PAS DE LIGNE");
     char buf[16];
-    fmtTime(buf, 16, lapCurrentMs);
+    uint32_t displayMs = lapRunning ? (millis() - lapLocalStart) : 0;
+    fmtTime(buf, 16, displayMs);
     gfx->setTextSize(3); gfx->setTextColor(WHITE);
     gfx->setCursor(10, 58); gfx->print(buf);
 
@@ -404,6 +414,9 @@ void loop(){
     if(rbFresh&&millis()-lastDraw>=40){rbFresh=false;lastDraw=millis();
         drawGear();drawSpeed();drawGForce();}
     if(lapFresh){lapFresh=false;drawChrono();}
+    // Chrono live à 10Hz (indépendant de l'UART)
+    static uint32_t lastChronoRefresh=0;
+    if(lapRunning&&millis()-lastChronoRefresh>=100){lastChronoRefresh=millis();drawChrono();}
     // Envoyer OBD au Wroom à 2Hz
     if(obdConnected&&millis()-lastOBDSend>=500){lastOBDSend=millis();sendOBDToWroom();}
     if(obdFresh){obdFresh=false;drawRpmLedBar();drawCoolant();
@@ -426,6 +439,6 @@ void loop(){
     if(millis()-lastStatus>=2000){lastStatus=millis();
         bool live=(millis()-lastRbRx)<2000;
         if(live!=prevLive||obdConnected!=prevObdOk){drawStatus();prevLive=live;prevObdOk=obdConnected;}}
-    if(!obdConnected&&millis()-lastOBDRetry>=15000){lastOBDRetry=millis();
+    if(!obdConnected&&!lapRunning&&millis()-lastOBDRetry>=30000){lastOBDRetry=millis();
         obdConnected=scanAndConnectOBD();drawStatus();drawCoolant();}
 }
