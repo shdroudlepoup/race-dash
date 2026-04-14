@@ -1,8 +1,10 @@
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 #include <NimBLEDevice.h>
+#include <Preferences.h>
 
 TFT_eSPI tft = TFT_eSPI();
+Preferences prefs;
 
 // ─── UART inter-ESP ───────────────────────────────────────
 #define UART_BAUD 115200
@@ -160,6 +162,36 @@ uint32_t bestLapMs = 0, lastLapMs = 0;
 uint8_t  lapNum = 0;
 uint32_t lastCrossTime = 0;
 
+void saveBestToNVS() {
+    prefs.begin("lap", false);
+    prefs.putUInt("best", bestLapMs);
+    prefs.end();
+    Serial.printf("[NVS] Best saved: %d ms\n", bestLapMs);
+}
+
+void saveGateToNVS() {
+    prefs.begin("lap", false);
+    prefs.putFloat("glat", gateLat);
+    prefs.putFloat("glon", gateLon);
+    prefs.putFloat("ghrd", gateHeadRad);
+    prefs.putBool("gset", true);
+    prefs.end();
+    Serial.printf("[NVS] Gate saved: %.6f, %.6f\n", gateLat, gateLon);
+}
+
+void loadFromNVS() {
+    prefs.begin("lap", true);  // read-only
+    bestLapMs = prefs.getUInt("best", 0);
+    gateLat = prefs.getFloat("glat", 0);
+    gateLon = prefs.getFloat("glon", 0);
+    gateHeadRad = prefs.getFloat("ghrd", 0);
+    gateSet = prefs.getBool("gset", false);
+    prefs.end();
+    if (gateSet) {
+        Serial.printf("[NVS] Gate loaded: %.6f, %.6f best=%dms\n", gateLat, gateLon, bestLapMs);
+    }
+}
+
 void showBtnMsg(const char* msg, uint16_t col) {
     tft.fillRect(20, 55, 200, 16, TFT_BLACK);
     tft.setTextSize(1); tft.setTextColor(col, TFT_BLACK);
@@ -203,9 +235,10 @@ void handleButtons() {
             lastLapMs = 0;
             prevDist = 0;
             lastCrossTime = millis();
-            if (rb.fix >= 3) showBtnMsg("LIGNE PLACEE!", TFT_GREEN);
+            saveGateToNVS();
+            if (rb.fix >= 3) showBtnMsg("LIGNE SAUVEE!", TFT_GREEN);
             else showBtnMsg("LIGNE (pas GPS)", TFT_ORANGE);
-            Serial.printf("[LAP] Gate set! fix=%d\n", rb.fix);
+            Serial.printf("[LAP] Gate set+saved! fix=%d\n", rb.fix);
         }
     }
     btn1WasDown = btn1Down;
@@ -216,6 +249,7 @@ void handleButtons() {
         bestLapMs = 0;
         lastLapMs = 0;
         lapNum = 0;
+        saveBestToNVS();
         showBtnMsg("BEST RESET!", TFT_YELLOW);
         Serial.println("[LAP] Best reset!");
     }
@@ -237,7 +271,7 @@ void checkLapCrossing() {
         if (lapTime > 10000) {  // minimum 10s
             lastLapMs = lapTime;
             lapNum++;
-            if (bestLapMs == 0 || lapTime < bestLapMs) bestLapMs = lapTime;
+            if (bestLapMs == 0 || lapTime < bestLapMs) { bestLapMs = lapTime; saveBestToNVS(); }
             lapStartMs = now;
             lastCrossTime = now;
             Serial.printf("[LAP] Tour %d: %d.%03ds (best: %d.%03ds)\n",
@@ -372,6 +406,9 @@ void setup() {
     drawGForceGrid();
     drawOBDDefaults();
     drawBottom();
+
+    loadFromNVS();
+    if (gateSet) showBtnMsg("LIGNE CHARGEE", TFT_GREEN);
 
     NimBLEDevice::init("GT86");
     auto* scan = NimBLEDevice::getScan();
