@@ -259,16 +259,22 @@ void handleButtons() {
     }
 }
 
+#define GATE_RADIUS 8.0f  // rayon max en mètres de chaque côté
+
 void checkLapCrossing() {
     if (!gateSet || rb.fix < 3 || rb.speedKmh < 20) return;
 
-    // Distance signée le long du heading (perpendiculaire à la ligne)
     float dx = (rb.lon - gateLon) * cosf(gateLat * PI / 180.0f) * 111320.0f;
     float dy = (rb.lat - gateLat) * 111320.0f;
+
+    // Distance signée le long du heading
     float dist = dx * sinf(gateHeadRad) + dy * cosf(gateHeadRad);
 
-    // Passage : le signe change (direction positive seulement)
-    if (prevDist <= 0 && dist > 0 && (millis() - lastCrossTime) > 10000) {
+    // Distance latérale (perpendiculaire au heading) = distance à la ligne
+    float lateral = -dx * cosf(gateHeadRad) + dy * sinf(gateHeadRad);
+
+    // Passage : bon sens + dans le rayon de 8m
+    if (prevDist <= 0 && dist > 0 && fabsf(lateral) < GATE_RADIUS && (millis() - lastCrossTime) > 10000) {
         uint32_t now = millis();
         uint32_t lapTime = now - lapStartMs;
 
