@@ -19,7 +19,10 @@ HardwareSerial InterSerial(0);
 #define FRAME_SYNC1 0xAA
 #define FRAME_SYNC2 0x55
 #define FRAME_TYPE_RB 0x01
+#define FRAME_TYPE_LAP 0x03
 #define FRAME_LEN_RB 12
+#define FRAME_LEN_LAP 18
+#define FRAME_MAX 18
 
 // ─── RaceBox (du Wroom via UART) ─────────────────────────
 float rbSpeed=0, rbGx=0, rbGy=0;
@@ -27,21 +30,49 @@ uint8_t rbFix=0, rbSvs=0;
 bool rbFresh=false;
 uint32_t lastRbRx=0;
 
-uint8_t uartBuf[FRAME_LEN_RB]; uint8_t uartPos=0;
+// ─── Lap data (du Wroom via UART) ────────────────────────
+uint32_t lapCurrentMs=0, lapBestMs=0, lapLastMs=0;
+uint8_t  lapNum=0;
+bool     lapGateSet=false;
+bool     lapFresh=false;
+
+uint8_t uartBuf[FRAME_MAX]; uint8_t uartPos=0; int uartExpected=0;
+
 void processUART() {
     while(InterSerial.available()) {
         uint8_t b=InterSerial.read();
         if(uartPos==0){if(b==FRAME_SYNC1)uartBuf[uartPos++]=b;}
         else if(uartPos==1){if(b==FRAME_SYNC2)uartBuf[uartPos++]=b;else uartPos=0;}
-        else{uartBuf[uartPos++]=b;
-            if(uartPos==FRAME_LEN_RB){uartPos=0;uint8_t crc=0;
-                for(int i=2;i<FRAME_LEN_RB-1;i++)crc^=uartBuf[i];
-                if(crc==uartBuf[FRAME_LEN_RB-1]&&uartBuf[2]==FRAME_TYPE_RB){
+        else if(uartPos==2){
+            uartBuf[uartPos++]=b;
+            if(b==FRAME_TYPE_RB) uartExpected=FRAME_LEN_RB;
+            else if(b==FRAME_TYPE_LAP) uartExpected=FRAME_LEN_LAP;
+            else uartPos=0;
+        } else {
+            uartBuf[uartPos++]=b;
+            if(uartPos==uartExpected){
+                uartPos=0;
+                uint8_t crc=0;
+                for(int i=2;i<uartExpected-1;i++)crc^=uartBuf[i];
+                if(crc!=uartBuf[uartExpected-1]) continue;
+
+                if(uartBuf[2]==FRAME_TYPE_RB){
                     rbSpeed=((uint16_t)(uartBuf[3]|uartBuf[4]<<8))/10.0f;
                     rbGx=(int16_t)(uartBuf[5]|uartBuf[6]<<8)/1000.0f;
                     rbGy=(int16_t)(uartBuf[7]|uartBuf[8]<<8)/1000.0f;
                     rbFix=uartBuf[9];rbSvs=uartBuf[10];
-                    rbFresh=true;lastRbRx=millis();}}}
+                    rbFresh=true;lastRbRx=millis();
+                }
+                else if(uartBuf[2]==FRAME_TYPE_LAP){
+                    lapCurrentMs=uartBuf[3]|(uint32_t)uartBuf[4]<<8|(uint32_t)uartBuf[5]<<16|(uint32_t)uartBuf[6]<<24;
+                    lapBestMs=uartBuf[7]|(uint32_t)uartBuf[8]<<8|(uint32_t)uartBuf[9]<<16|(uint32_t)uartBuf[10]<<24;
+                    lapLastMs=uartBuf[11]|(uint32_t)uartBuf[12]<<8|(uint32_t)uartBuf[13]<<16|(uint32_t)uartBuf[14]<<24;
+                    lapNum=uartBuf[15];
+                    lapGateSet=uartBuf[16]&1;
+                    lapFresh=true;
+                }
+            }
+        }
     }
 }
 
@@ -270,15 +301,67 @@ void drawStatus(){
     gfx->print(milOn?"MIL!":"MIL");
 }
 
-// Placeholders chrono (panneau gauche)
-void drawChronoPlaceholders(){
-    gfx->setTextSize(2);gfx->setTextColor(WHITE);
-    gfx->setCursor(15,50);gfx->print("--:--.--");
-    gfx->setCursor(15,100);gfx->print("--:--.--");
-    gfx->setTextSize(4);gfx->setTextColor(0x4208);
-    gfx->setCursor(15,390);gfx->print("+0.00");
-    gfx->setTextSize(2);gfx->setTextColor(0x4208);
-    gfx->setCursor(215,445);gfx->print("FUEL: --L");
+// ─── Formatage temps mm:ss.cc ─────────────────────────────
+void fmtTime(char* buf, int sz, uint32_t ms) {
+    if (ms == 0) { snprintf(buf, sz, "--:--.--"); return; }
+    int min = ms / 60000;
+    int sec = (ms % 60000) / 1000;
+    int cs  = (ms % 1000) / 10;
+    snprintf(buf, sz, "%d:%02d.%02d", min, sec, cs);
+}
+
+uint32_t prevLapCur=0xFFFFFFFF, prevLapBest=0xFFFFFFFF, prevLapLast=0xFFFFFFFF;
+int prevDelta=99999;
+
+void drawChrono() {
+    // Tour actuel (live)
+    gfx->fillRect(5, 42, 200, 55, BLACK);
+    gfx->setTextSize(1); gfx->setTextColor(0x4208);
+    gfx->setCursor(10, 44); gfx->print(lapGateSet ? "TOUR EN COURS:" : "PAS DE LIGNE");
+    char buf[16];
+    fmtTime(buf, 16, lapCurrentMs);
+    gfx->setTextSize(3); gfx->setTextColor(WHITE);
+    gfx->setCursor(10, 58); gfx->print(buf);
+
+    // Meilleur tour
+    gfx->fillRect(5, 102, 200, 55, BLACK);
+    gfx->setTextSize(1); gfx->setTextColor(0x4208);
+    gfx->setCursor(10, 104); gfx->print("MEILLEUR:");
+    fmtTime(buf, 16, lapBestMs);
+    gfx->setTextSize(3); gfx->setTextColor(0x07E0);  // vert
+    gfx->setCursor(10, 118); gfx->print(buf);
+
+    // Dernier tour
+    gfx->fillRect(5, 162, 200, 55, BLACK);
+    gfx->setTextSize(1); gfx->setTextColor(0x4208);
+    gfx->setCursor(10, 164); gfx->print("DERNIER:");
+    fmtTime(buf, 16, lapLastMs);
+    gfx->setTextSize(3); gfx->setTextColor(WHITE);
+    gfx->setCursor(10, 178); gfx->print(buf);
+
+    // Delta (dernier - meilleur)
+    gfx->fillRect(5, 378, 200, 90, BLACK);
+    if (lapLastMs > 0 && lapBestMs > 0) {
+        int32_t delta = (int32_t)lapLastMs - (int32_t)lapBestMs;
+        gfx->setTextSize(1); gfx->setTextColor(0x4208);
+        gfx->setCursor(10, 380); gfx->print("DELTA:");
+        gfx->setTextSize(4);
+        gfx->setTextColor(delta <= 0 ? 0x07E0 : 0xF800);  // vert=plus rapide, rouge=plus lent
+        snprintf(buf, 16, "%s%.2f", delta <= 0 ? "" : "+", delta / 1000.0f);
+        gfx->setCursor(10, 400); gfx->print(buf);
+    }
+
+    // Tour N°
+    gfx->fillRect(5, 230, 200, 30, BLACK);
+    gfx->setTextSize(2); gfx->setTextColor(0x4208);
+    gfx->setCursor(10, 235);
+    gfx->print("TOUR: "); gfx->print(lapNum);
+}
+
+void drawChronoPlaceholders() {
+    drawChrono();
+    gfx->setTextSize(2); gfx->setTextColor(0x4208);
+    gfx->setCursor(215, 445); gfx->print("FUEL: --L");
 }
 
 // ─── Setup & Loop ─────────────────────────────────────────
@@ -300,6 +383,7 @@ void loop(){
     processUART();processOBD();
     if(rbFresh&&millis()-lastDraw>=40){rbFresh=false;lastDraw=millis();
         drawGear();drawSpeed();drawGForce();}
+    if(lapFresh){lapFresh=false;drawChrono();}
     if(obdFresh){obdFresh=false;drawRpmLedBar();drawCoolant();
         // MIL check — alerte si voyant moteur allumé
         static bool milShown=false;
