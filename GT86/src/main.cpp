@@ -31,7 +31,7 @@ uint16_t rxRpm=0; int16_t rxCoolant=0; uint8_t rxMIL=0; bool rxOBDFresh=false;
 
 uint8_t rxBufU[12]; uint8_t rxPosU=0; int rxExpected=0;
 void processUARTRx() {
-    while(Serial.available()){uint8_t b=Serial.read();
+    while(Serial1.available()){uint8_t b=Serial1.read();
         if(rxPosU==0){if(b==FRAME_SYNC1)rxBufU[rxPosU++]=b;}
         else if(rxPosU==1){if(b==FRAME_SYNC2)rxBufU[rxPosU++]=b;else rxPosU=0;}
         else if(rxPosU==2){rxBufU[rxPosU++]=b;if(b==FRAME_TYPE_OBD)rxExpected=FRAME_LEN_OBD;else rxPosU=0;}
@@ -86,7 +86,7 @@ bool connectRaceBox(){auto*c=NimBLEDevice::createClient();c->setClientCallbacks(
 void sendRBFrame(){UARTFrame f;f.sync1=FRAME_SYNC1;f.sync2=FRAME_SYNC2;f.type=FRAME_TYPE_RB;
     f.speedX10=(uint16_t)(rb.speedKmh*10.0f);f.gxX1000=(int16_t)(rb.gx*1000.0f);f.gyX1000=(int16_t)(rb.gy*1000.0f);
     f.fix=rb.fix;f.svs=rb.svs;uint8_t crc=0;for(int i=2;i<FRAME_LEN_RB-1;i++)crc^=((uint8_t*)&f)[i];
-    f.crc=crc;Serial.write((const uint8_t*)&f,FRAME_LEN_RB);}
+    f.crc=crc;Serial1.write((const uint8_t*)&f,FRAME_LEN_RB);}
 
 // ─── Chrono ───────────────────────────────────────────────
 bool gateSet=false; float gateLat=0,gateLon=0,gateHeadRad=0; float prevDistG=0;
@@ -136,7 +136,7 @@ void checkLapCrossing(){if(!gateSet||rb.fix<3||rb.speedKmh<20)return;
 void sendLapFrame(){LapFrame f;f.sync1=FRAME_SYNC1;f.sync2=FRAME_SYNC2;f.type=FRAME_TYPE_LAP;
     f.currentMs=gateSet?(millis()-lapStartMs):0;f.bestMs=bestLapMs;f.lastMs=lastLapMs;f.lapNum=lapNum;
     f.flags=gateSet?1:0;uint8_t crc=0;for(int i=2;i<FRAME_LEN_LAP-1;i++)crc^=((uint8_t*)&f)[i];
-    f.crc=crc;Serial.write((const uint8_t*)&f,FRAME_LEN_LAP);}
+    f.crc=crc;Serial1.write((const uint8_t*)&f,FRAME_LEN_LAP);}
 
 // ─── Affichage GC9A01 ────────────────────────────────────
 #define GCX 120
@@ -181,7 +181,7 @@ void updateDisplay(){drawGForce();int spd=(int)(rb.speedKmh+0.5f);
 
 // ─── Setup ────────────────────────────────────────────────
 void setup(){
-    Serial.begin(UART_BAUD);
+    Serial1.begin(UART_BAUD, SERIAL_8N1, 20, 21);  // UART1 explicite sur GPIO20/21
     pinMode(BTN_SET,INPUT_PULLUP);pinMode(BTN_RESET,INPUT_PULLUP);pinMode(10,INPUT_PULLUP);
 
     delay(500);
