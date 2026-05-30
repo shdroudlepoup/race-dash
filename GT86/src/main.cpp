@@ -1,5 +1,8 @@
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
+#include "fonts/FreeSansBold24pt7b.h"
+#include "fonts/FreeSansBold12pt7b.h"
+#include "fonts/FreeSansBold9pt7b.h"
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
@@ -166,14 +169,16 @@ void drawTemperature(int temp) {
         arcDot(a, c, ARC_R - ARC_W/2, ARC_W/2);
     }
 
-    // Nombre au centre (gros)
-    gfx->fillRect(55, 88, 130, 48, BG_COLOR);
-    gfx->setTextSize(6);
+    // Nombre au centre (gros, police arrondie)
+    gfx->fillRect(45, 75, 150, 55, BG_COLOR);
+    gfx->setFont(&FreeSansBold24pt7b);
     gfx->setTextColor(col);
     char buf[6]; snprintf(buf, 6, "%d", temp);
-    int w = strlen(buf) * 36;
-    gfx->setCursor((240 - w) / 2, 92);
+    int16_t x1,y1; uint16_t tw,th;
+    gfx->getTextBounds(buf, 0, 0, &x1, &y1, &tw, &th);
+    gfx->setCursor((240 - tw) / 2, 118);
     gfx->print(buf);
+    gfx->setFont(NULL);
 
     prevTempAngle = targetAngle;
 }
@@ -184,21 +189,24 @@ void drawRPM(int rpm) {
     if (rpm == prevDispRpm) return;
     prevDispRpm = rpm;
 
-    gfx->fillRect(60, 148, 120, 24, BG_COLOR);
-    gfx->setTextSize(2);
+    gfx->fillRect(50, 135, 140, 30, BG_COLOR);
+    gfx->setFont(&FreeSansBold12pt7b);
     gfx->setTextColor(C_WHITE);
-    char buf[10]; snprintf(buf, 10, "%d rpm", rpm);
-    int w = strlen(buf) * 12;
-    gfx->setCursor((240 - w) / 2, 150);
+    char buf[10]; snprintf(buf, 10, "%d", rpm);
+    int16_t x1,y1; uint16_t tw,th;
+    gfx->getTextBounds(buf, 0, 0, &x1, &y1, &tw, &th);
+    gfx->setCursor((240 - tw) / 2, 158);
     gfx->print(buf);
+    gfx->setFont(NULL);
 }
 
 void drawOBDStatus() {
-    gfx->fillRect(60, 190, 120, 20, BG_COLOR);
-    gfx->setTextSize(2);
-    gfx->setTextColor(obdConnected ? 0x07E0 : 0x4208);  // vert / gris
-    gfx->setCursor(75, 192);
+    gfx->fillRect(55, 170, 130, 25, BG_COLOR);
+    gfx->setFont(&FreeSansBold9pt7b);
+    gfx->setTextColor(obdConnected ? 0x07E0 : 0xBDF7);
+    gfx->setCursor(obdConnected ? 75 : 82, 188);
     gfx->print(obdConnected ? "OBD OK" : "OBD...");
+    gfx->setFont(NULL);
 }
 
 // ─── Shift alert (écran rouge clignotant) ────────────────
@@ -247,6 +255,7 @@ void setup() {
     Serial1.begin(UART_BAUD, SERIAL_8N1, 20, 21);
     delay(500);
     if (!gfx->begin()) return;
+    gfx->setRotation(3);  // 90° anti-horaire
     gfx->fillScreen(BG_COLOR);
     drawGaugeBackground();
     drawTemperature(0);
