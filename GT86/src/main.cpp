@@ -9,7 +9,7 @@
 #include <BLEAdvertisedDevice.h>
 
 // ─── Display GC9A01 (SW SPI C3 Super Mini) ───────────────
-Arduino_DataBus *bus = new Arduino_SWSPI(5,7,4,6);
+Arduino_DataBus *bus = new Arduino_ESP32SPI(5,7,4,6);  // DC,CS,SCK,MOSI — HW SPI
 Arduino_GC9A01 *gfx = new Arduino_GC9A01(bus, 3);
 
 // ─── UART (Serial1 sur GPIO20/21) ────────────────────────
@@ -103,13 +103,13 @@ void sendOBDFrame(){OBDMiniFrame f;f.sync1=FRAME_SYNC1;f.sync2=FRAME_SYNC2;f.typ
 // ─── Affichage manomètre GC9A01 240×240 ─────────────────
 // Sur cet écran : 0xFFFF = noir, 0x0000 = blanc (inversé natif + BGR)
 #define BG_COLOR 0xFFFF  // noir sur cet écran
-#define ARC_OFF  0xE79C  // gris sombre (proche de 0xFFFF = noir)
+#define ARC_OFF  0xCE59  // gris sombre visible (~0x31A6)
 #define C_WHITE  0x0000  // blanc sur cet écran
 
 #define CX 120
 #define CY 120
 #define ARC_R    108   // rayon extérieur arc
-#define ARC_W    14    // épaisseur arc
+#define ARC_W    10    // épaisseur arc
 #define ARC_START 135  // début (bas-gauche, en degrés)
 #define ARC_END   405  // fin (bas-droite = 45°)
 #define TEMP_MIN  0
@@ -120,28 +120,34 @@ void sendOBDFrame(){OBDMiniFrame f;f.sync1=FRAME_SYNC1;f.sync2=FRAME_SYNC2;f.typ
 // Cet écran inverse tous les bits : envoyer ~couleur
 // ~RED=0x07FF  ~GREEN=0xF81F  ~BLUE=0xFFE0  ~YELLOW=0x001F  ~ORANGE=0x02DF
 uint16_t tempColor(int temp) {
-    if (temp < 60)  return 0xF800;  // bleu clair (~0x07FF = cyan)
-    if (temp < 85)  return 0xF81F;  // vert (~0x07E0)
-    if (temp < 95)  return 0x001F;  // jaune (~0xFFE0)
-    if (temp < 105) return 0x02DF;  // orange (~0xFD20)
-    return 0x07FF;                  // rouge (~0xF800)
+    if (temp < 50)  return 0xF800;  // bleu clair
+    if (temp < 70)  return 0xF81F;  // vert clair
+    if (temp < 95)  return 0xF81F;  // vert (zone normale 70-95°C)
+    if (temp < 100) return 0x001F;  // jaune
+    if (temp < 108) return 0x02DF;  // orange
+    return 0x07FF;                  // rouge
 }
 
-// Dessiner un point épais sur l'arc
-void arcDot(int angle, uint16_t col, int r, int thick) {
-    float rad = angle * PI / 180.0f;
-    int x = CX + (int)(r * cosf(rad));
-    int y = CY + (int)(r * sinf(rad));
-    gfx->fillCircle(x, y, thick, col);
+// Dessiner un segment d'arc (2 lignes radiales côte à côte pour combler les trous)
+void arcSegment(int angle, uint16_t col) {
+    for (int sub = 0; sub <= 1; sub++) {
+        float rad = (angle * 10 + sub * 5) / 10.0f * PI / 180.0f;
+        float cs = cosf(rad), sn = sinf(rad);
+        int x1 = CX + (int)((ARC_R - ARC_W) * cs);
+        int y1 = CY + (int)((ARC_R - ARC_W) * sn);
+        int x2 = CX + (int)(ARC_R * cs);
+        int y2 = CY + (int)(ARC_R * sn);
+        gfx->drawLine(x1, y1, x2, y2, col);
+    }
 }
 
 int prevTempAngle = -1;
 bool gaugeDrawn = false;
 
 void drawGaugeBackground() {
-    // Arc de fond (gris sombre)
-    for (int a = ARC_START; a <= ARC_END; a += 2) {
-        arcDot(a, ARC_OFF, ARC_R - ARC_W/2, ARC_W/2);
+    // Arc de fond (segments radiaux)
+    for (int a = ARC_START; a <= ARC_END; a++) {
+        arcSegment(a, ARC_OFF);
     }
     // Graduations
     gfx->setTextSize(1); gfx->setTextColor(0xBDF7);
@@ -168,13 +174,12 @@ void drawTemperature(int temp) {
 
     // Redessiner l'arc coloré
     uint16_t col = tempColor(temp);
-    for (int a = ARC_START; a <= ARC_END; a += 2) {
-        uint16_t c = (a <= targetAngle) ? col : ARC_OFF;
-        arcDot(a, c, ARC_R - ARC_W/2, ARC_W/2);
+    for (int a = ARC_START; a <= ARC_END; a++) {
+        arcSegment(a, (a <= targetAngle) ? col : ARC_OFF);
     }
 
-    // Température centré X+Y avec °C même couleur
-    gfx->fillRect(50, 88, 140, 40, BG_COLOR);
+    // Température centré X+Y avec °
+    gfx->fillRect(48, 86, 144, 56, BG_COLOR);
     gfx->setFont(&FreeSansBold24pt7b);
     gfx->setTextColor(col);
     char buf[6]; snprintf(buf, 6, "%d", temp);
@@ -244,19 +249,16 @@ void handleShiftAlert() {
         drawRPM(obdRpm);
     }
 
-    if (shiftActive && millis() - lastShiftFlash >= 150) {
-        lastShiftFlash = millis();
-        shiftFlashState = !shiftFlashState;
-        gfx->fillScreen(shiftFlashState ? 0x07FF : BG_COLOR);  // rouge (~0xF800)
-        if (shiftFlashState) {
-            gfx->setTextSize(4); gfx->setTextColor(C_WHITE);
-            gfx->setCursor(40, 90); gfx->print("SHIFT!");
-            gfx->setTextSize(3);
-            char buf[10]; snprintf(buf, 10, "%d", obdRpm);
-            int w = strlen(buf) * 18;
-            gfx->setCursor((240 - w) / 2, 140);
-            gfx->print(buf);
-        }
+    if (shiftActive && !shiftFlashState) {
+        shiftFlashState = true;
+        gfx->fillScreen(0x07FF);  // rouge fixe
+        gfx->setFont(&FreeSansBold24pt7b);
+        gfx->setTextColor(C_WHITE);
+        int16_t x1,y1; uint16_t tw,th;
+        gfx->getTextBounds("SHIFT!", 0, 0, &x1, &y1, &tw, &th);
+        gfx->setCursor((240 - tw) / 2, 130);
+        gfx->print("SHIFT!");
+        gfx->setFont(NULL);
     }
 }
 
