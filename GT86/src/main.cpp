@@ -5,8 +5,8 @@
 #include <BLEAdvertisedDevice.h>
 
 // ─── Display GC9A01 (SW SPI C3 Super Mini) ───────────────
-Arduino_DataBus *bus = new Arduino_SWSPI(5,7,4,6); // DC,CS,SCK,MOSI
-Arduino_GC9A01 *gfx = new Arduino_GC9A01(bus, 3);  // RST
+Arduino_DataBus *bus = new Arduino_SWSPI(5,7,4,6);
+Arduino_GC9A01 *gfx = new Arduino_GC9A01(bus, 3);
 
 // ─── UART (Serial1 sur GPIO20/21) ────────────────────────
 #define UART_BAUD 115200
@@ -36,11 +36,9 @@ static void obdNotifyCB(BLERemoteCharacteristic*,uint8_t*data,size_t len,bool){
 int obdAvail(){return(bleHead-bleTail+BLE_BUF_SIZE)%BLE_BUF_SIZE;}
 int obdRead(){if(bleHead==bleTail)return-1;uint8_t b=bleBuf[bleTail];bleTail=(bleTail+1)%BLE_BUF_SIZE;return b;}
 
-// OBD data
 uint16_t obdRpm=0; int16_t obdCoolant=0; uint8_t obdMIL=0;
 bool obdFresh=false;
 
-// PID round-robin
 struct PIDDef{const char*cmd;uint8_t pid;uint8_t bytes;};
 const PIDDef pidList[]={{"010C\r",0x0C,2},{"0105\r",0x05,1},{"010C\r",0x0C,2},{"0101\r",0x01,4}};
 #define PID_COUNT 4
@@ -51,12 +49,10 @@ bool parseOBDHex(const String&r,uint8_t pid,uint8_t*d,int c){
     int idx=cl.indexOf(pf);if(idx<0)return false;idx+=4;
     for(int i=0;i<c;i++){if(idx+2>(int)cl.length())return false;
     d[i]=strtol(cl.substring(idx,idx+2).c_str(),NULL,16);idx+=2;}return true;}
-
 void applyPIDValue(){uint8_t d[4];uint8_t pid=pidList[currentPID].pid;
     if(!parseOBDHex(obdResp,pid,d,pidList[currentPID].bytes))return;
     switch(pid){case 0x0C:obdRpm=(d[0]*256+d[1])/4;break;case 0x05:obdCoolant=(int16_t)d[0]-40;break;
     case 0x01:obdMIL=d[0];break;}obdFresh=true;}
-
 void processOBD(){if(!obdConnected||!obdWriteChar)return;
     while(obdAvail()){char c=obdRead();
         if(c=='>'){if(queryPending){applyPIDValue();queryPending=false;currentPID=(currentPID+1)%PID_COUNT;}obdResp="";}
@@ -91,19 +87,8 @@ bool scanAndConnectOBD(){
     if(!hasPrompt){obdClient->disconnect();return false;}
     bleHead=bleTail=0;return true;}
 
-// ─── RaceBox (reçu du S3 via UART) ──────────────────────
-float rbGx=0,rbGy=0;
-uint8_t rxBufU[FRAME_LEN_RB]; uint8_t rxPosU=0;
-
-void processUARTRx(){
-    while(Serial1.available()){uint8_t b=Serial1.read();
-        if(rxPosU==0){if(b==FRAME_SYNC1)rxBufU[rxPosU++]=b;}
-        else if(rxPosU==1){if(b==FRAME_SYNC2)rxBufU[rxPosU++]=b;else rxPosU=0;}
-        else{rxBufU[rxPosU++]=b;if(rxPosU==FRAME_LEN_RB){rxPosU=0;uint8_t crc=0;
-            for(int i=2;i<FRAME_LEN_RB-1;i++)crc^=rxBufU[i];
-            if(crc==rxBufU[FRAME_LEN_RB-1]&&rxBufU[2]==FRAME_TYPE_RB){
-                rbGx=(int16_t)(rxBufU[5]|rxBufU[6]<<8)/1000.0f;
-                rbGy=(int16_t)(rxBufU[7]|rxBufU[8]<<8)/1000.0f;}}}}}
+// ─── UART RX (RaceBox du S3) — pas utilisé pour l'affichage ─
+void processUARTRx(){while(Serial1.available()){Serial1.read();}}
 
 // ─── Envoi OBD vers S3 ──────────────────────────────────
 void sendOBDFrame(){OBDMiniFrame f;f.sync1=FRAME_SYNC1;f.sync2=FRAME_SYNC2;f.type=FRAME_TYPE_OBD;
@@ -111,69 +96,183 @@ void sendOBDFrame(){OBDMiniFrame f;f.sync1=FRAME_SYNC1;f.sync2=FRAME_SYNC2;f.typ
     uint8_t crc=0;for(int i=2;i<FRAME_LEN_OBD-1;i++)crc^=((uint8_t*)&f)[i];
     f.crc=crc;Serial1.write((const uint8_t*)&f,FRAME_LEN_OBD);}
 
-// ─── Affichage GC9A01 ────────────────────────────────────
-#define GCX 120
-#define GCY 115
-#define GCR 55
-#define GSCALE 2.0f
-int prevDotX=GCX,prevDotY=GCY;
-int prevCool=-999,prevRpm=-1;
+// ─── Affichage manomètre GC9A01 240×240 ─────────────────
+// Sur cet écran : 0xFFFF = noir, 0x0000 = blanc (inversé natif + BGR)
+#define BG_COLOR 0xFFFF  // noir sur cet écran
+#define ARC_OFF  0xE79C  // gris sombre (proche de 0xFFFF = noir)
+#define C_WHITE  0x0000  // blanc sur cet écran
 
-void drawGForceGrid(){gfx->drawCircle(GCX,GCY,GCR,0x4208);gfx->drawCircle(GCX,GCY,GCR/2,0x2945);
-    gfx->drawFastHLine(GCX-GCR,GCY,GCR*2,0x2945);gfx->drawFastVLine(GCX,GCY-GCR,GCR*2,0x2945);
-    gfx->fillCircle(GCX,GCY,7,GREEN);}
+#define CX 120
+#define CY 120
+#define ARC_R    108   // rayon extérieur arc
+#define ARC_W    14    // épaisseur arc
+#define ARC_START 135  // début (bas-gauche, en degrés)
+#define ARC_END   405  // fin (bas-droite = 45°)
+#define TEMP_MIN  0
+#define TEMP_MAX  130
+#define SHIFT_RPM 7000  // GT86 FA20 redline = 7400
 
-void drawGForce(){gfx->fillCircle(prevDotX,prevDotY,7,BLACK);
-    gfx->drawFastHLine(GCX-GCR,GCY,GCR*2,0x2945);gfx->drawFastVLine(GCX,GCY-GCR,GCR*2,0x2945);
-    float nx=(rbGx/GSCALE)*GCR;float ny=(-rbGy/GSCALE)*GCR;float d=sqrtf(nx*nx+ny*ny);
-    if(d>GCR){float s=GCR/d;nx*=s;ny*=s;d=GCR;}
-    prevDotX=GCX+(int)nx;prevDotY=GCY+(int)ny;
-    gfx->fillCircle(prevDotX,prevDotY,7,d/GCR>0.8f?RED:(d/GCR>0.4f?0xFD20:GREEN));}
-
-void drawOBDValues(){
-    if(obdCoolant!=prevCool){prevCool=obdCoolant;gfx->fillRect(30,170,80,18,BLACK);gfx->setTextSize(2);
-        gfx->setTextColor(obdCoolant>100?RED:(obdCoolant>90?0xFD20:GREEN));
-        char buf[8];snprintf(buf,8,"%d\xF7""C",obdCoolant);gfx->setCursor(35,172);gfx->print(buf);}
-    if((int)obdRpm!=prevRpm){prevRpm=obdRpm;gfx->fillRect(130,170,80,18,BLACK);gfx->setTextSize(2);
-        gfx->setTextColor(WHITE);char buf[8];snprintf(buf,8,"%d",obdRpm);gfx->setCursor(135,172);gfx->print(buf);}
+// Couleur en fonction de la température
+// Couleurs BGR (R et B inversés sur ce GC9A01)
+uint16_t tempColor(int temp) {
+    if (temp < 60)  return 0xF800;  // bleu (affiché comme bleu en BGR)
+    if (temp < 85)  return 0x07E0;  // vert
+    if (temp < 95)  return 0x07FF;  // jaune en BGR
+    if (temp < 105) return 0x053F;  // orange en BGR
+    return 0x001F;                  // rouge en BGR
 }
 
-void drawStatus(){
-    gfx->fillRect(30,190,180,25,BLACK);gfx->setTextSize(2);
-    gfx->setTextColor(obdConnected?GREEN:(uint16_t)0x4208);
-    gfx->setCursor(70,194);gfx->print(obdConnected?"OBD":"---");
-    bool milOn=obdMIL&0x80;if(milOn){gfx->setTextColor(RED);gfx->setCursor(140,194);gfx->print("MIL");}
+// Dessiner un point épais sur l'arc
+void arcDot(int angle, uint16_t col, int r, int thick) {
+    float rad = angle * PI / 180.0f;
+    int x = CX + (int)(r * cosf(rad));
+    int y = CY + (int)(r * sinf(rad));
+    gfx->fillCircle(x, y, thick, col);
+}
+
+int prevTempAngle = -1;
+bool gaugeDrawn = false;
+
+void drawGaugeBackground() {
+    // Arc de fond (gris sombre)
+    for (int a = ARC_START; a <= ARC_END; a += 2) {
+        arcDot(a, ARC_OFF, ARC_R - ARC_W/2, ARC_W/2);
+    }
+    // Graduations
+    gfx->setTextSize(1); gfx->setTextColor(0xBDF7);
+    int temps[] = {0, 30, 60, 90, 120};
+    for (int i = 0; i < 5; i++) {
+        int angle = ARC_START + (int)((float)temps[i] / TEMP_MAX * (ARC_END - ARC_START));
+        float rad = angle * PI / 180.0f;
+        int x1 = CX + (int)((ARC_R + 2) * cosf(rad));
+        int y1 = CY + (int)((ARC_R + 2) * sinf(rad));
+        int x2 = CX + (int)((ARC_R - ARC_W - 2) * cosf(rad));
+        int y2 = CY + (int)((ARC_R - ARC_W - 2) * sinf(rad));
+        gfx->drawLine(x1, y1, x2, y2, 0x4208);
+    }
+    gaugeDrawn = true;
+}
+
+void drawTemperature(int temp) {
+    int tempClamped = constrain(temp, TEMP_MIN, TEMP_MAX);
+    int targetAngle = ARC_START + (int)((float)tempClamped / TEMP_MAX * (ARC_END - ARC_START));
+
+    if (targetAngle == prevTempAngle) return;
+
+    // Redessiner l'arc coloré
+    uint16_t col = tempColor(temp);
+    for (int a = ARC_START; a <= ARC_END; a += 2) {
+        uint16_t c = (a <= targetAngle) ? col : ARC_OFF;
+        arcDot(a, c, ARC_R - ARC_W/2, ARC_W/2);
+    }
+
+    // Nombre au centre (gros)
+    gfx->fillRect(55, 88, 130, 48, BG_COLOR);
+    gfx->setTextSize(6);
+    gfx->setTextColor(col);
+    char buf[6]; snprintf(buf, 6, "%d", temp);
+    int w = strlen(buf) * 36;
+    gfx->setCursor((240 - w) / 2, 92);
+    gfx->print(buf);
+
+    prevTempAngle = targetAngle;
+}
+
+int prevDispRpm = -1;
+
+void drawRPM(int rpm) {
+    if (rpm == prevDispRpm) return;
+    prevDispRpm = rpm;
+
+    gfx->fillRect(60, 148, 120, 24, BG_COLOR);
+    gfx->setTextSize(2);
+    gfx->setTextColor(C_WHITE);
+    char buf[10]; snprintf(buf, 10, "%d rpm", rpm);
+    int w = strlen(buf) * 12;
+    gfx->setCursor((240 - w) / 2, 150);
+    gfx->print(buf);
+}
+
+void drawOBDStatus() {
+    gfx->fillRect(60, 190, 120, 20, BG_COLOR);
+    gfx->setTextSize(2);
+    gfx->setTextColor(obdConnected ? 0x07E0 : 0x4208);  // vert / gris
+    gfx->setCursor(75, 192);
+    gfx->print(obdConnected ? "OBD OK" : "OBD...");
+}
+
+// ─── Shift alert (écran rouge clignotant) ────────────────
+bool shiftActive = false;
+bool shiftFlashState = false;
+uint32_t lastShiftFlash = 0;
+
+void handleShiftAlert() {
+    bool shouldShift = obdRpm > SHIFT_RPM && obdConnected;
+
+    if (shouldShift && !shiftActive) {
+        shiftActive = true;
+        lastShiftFlash = millis();
+    }
+    if (!shouldShift && shiftActive) {
+        shiftActive = false;
+        shiftFlashState = false;
+        // Redessiner tout
+        gfx->fillScreen(BG_COLOR);
+        drawGaugeBackground();
+        drawOBDStatus();
+        prevTempAngle = -1;
+        prevDispRpm = -1;
+        drawTemperature(obdCoolant);
+        drawRPM(obdRpm);
+    }
+
+    if (shiftActive && millis() - lastShiftFlash >= 150) {
+        lastShiftFlash = millis();
+        shiftFlashState = !shiftFlashState;
+        gfx->fillScreen(shiftFlashState ? 0x001F : BG_COLOR);  // rouge en BGR
+        if (shiftFlashState) {
+            gfx->setTextSize(4); gfx->setTextColor(C_WHITE);
+            gfx->setCursor(40, 90); gfx->print("SHIFT!");
+            gfx->setTextSize(3);
+            char buf[10]; snprintf(buf, 10, "%d", obdRpm);
+            int w = strlen(buf) * 18;
+            gfx->setCursor((240 - w) / 2, 140);
+            gfx->print(buf);
+        }
+    }
 }
 
 // ─── Setup ────────────────────────────────────────────────
-void setup(){
-    Serial1.begin(UART_BAUD,SERIAL_8N1,20,21);
+void setup() {
+    Serial1.begin(UART_BAUD, SERIAL_8N1, 20, 21);
     delay(500);
-    if(!gfx->begin())return;
-    gfx->fillScreen(BLACK);gfx->drawCircle(120,120,118,0xFD20);
-    gfx->setTextSize(2);gfx->setTextColor(WHITE);gfx->setCursor(84,40);gfx->print("GT86");
-    drawGForceGrid();
-    gfx->setTextSize(2);gfx->setTextColor(0x4208);
-    gfx->setCursor(35,172);gfx->print("--\xF7""C");gfx->setCursor(135,172);gfx->print("----");
-    drawStatus();
+    if (!gfx->begin()) return;
+    gfx->fillScreen(BG_COLOR);
+    drawGaugeBackground();
+    drawTemperature(0);
+    drawRPM(0);
+    drawOBDStatus();
     BLEDevice::init("");
 }
 
 // ─── Loop ─────────────────────────────────────────────────
-uint32_t lastDraw=0,lastOBDSend=0,lastOBDRetry=0,lastStatus=0;
+uint32_t lastOBDSend=0, lastOBDRetry=0;
 bool prevObd=false;
 
-void loop(){
-    processUARTRx();processOBD();
-    // Accéléromètre (données du S3)
-    if(millis()-lastDraw>=50){lastDraw=millis();drawGForce();}
-    // OBD values
-    if(obdFresh){obdFresh=false;drawOBDValues();}
-    // Envoi OBD au S3 à 2Hz
-    if(obdConnected&&millis()-lastOBDSend>=500){lastOBDSend=millis();sendOBDFrame();}
-    // Status
-    if(obdConnected!=prevObd){prevObd=obdConnected;drawStatus();}
-    // Retry OBD
-    if(!obdConnected&&millis()-lastOBDRetry>=15000){lastOBDRetry=millis();
-        obdConnected=scanAndConnectOBD();drawStatus();}
+void loop() {
+    processUARTRx(); processOBD();
+
+    if (obdFresh) {
+        obdFresh = false;
+        if (!shiftActive) {
+            drawTemperature(obdCoolant);
+            drawRPM(obdRpm);
+        }
+    }
+    handleShiftAlert();
+
+    if (obdConnected && millis()-lastOBDSend>=500) { lastOBDSend=millis(); sendOBDFrame(); }
+    if (obdConnected!=prevObd) { prevObd=obdConnected; if(!shiftActive) drawOBDStatus(); }
+    if (!obdConnected && millis()-lastOBDRetry>=15000) { lastOBDRetry=millis();
+        obdConnected=scanAndConnectOBD(); drawOBDStatus(); }
 }
