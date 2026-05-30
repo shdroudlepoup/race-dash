@@ -3,6 +3,7 @@
 #include "fonts/FreeSansBold24pt7b.h"
 #include "fonts/FreeSansBold12pt7b.h"
 #include "fonts/FreeSansBold9pt7b.h"
+#include "chara_img.h"
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
@@ -116,13 +117,14 @@ void sendOBDFrame(){OBDMiniFrame f;f.sync1=FRAME_SYNC1;f.sync2=FRAME_SYNC2;f.typ
 #define SHIFT_RPM 7000  // GT86 FA20 redline = 7400
 
 // Couleur en fonction de la température
-// Couleurs BGR (R et B inversés sur ce GC9A01)
+// Cet écran inverse tous les bits : envoyer ~couleur
+// ~RED=0x07FF  ~GREEN=0xF81F  ~BLUE=0xFFE0  ~YELLOW=0x001F  ~ORANGE=0x02DF
 uint16_t tempColor(int temp) {
-    if (temp < 60)  return 0xF800;  // bleu (affiché comme bleu en BGR)
-    if (temp < 85)  return 0x07E0;  // vert
-    if (temp < 95)  return 0x07FF;  // jaune en BGR
-    if (temp < 105) return 0x053F;  // orange en BGR
-    return 0x001F;                  // rouge en BGR
+    if (temp < 60)  return 0xF800;  // bleu clair (~0x07FF = cyan)
+    if (temp < 85)  return 0xF81F;  // vert (~0x07E0)
+    if (temp < 95)  return 0x001F;  // jaune (~0xFFE0)
+    if (temp < 105) return 0x02DF;  // orange (~0xFD20)
+    return 0x07FF;                  // rouge (~0xF800)
 }
 
 // Dessiner un point épais sur l'arc
@@ -153,6 +155,8 @@ void drawGaugeBackground() {
         int y2 = CY + (int)((ARC_R - ARC_W - 2) * sinf(rad));
         gfx->drawLine(x1, y1, x2, y2, 0x4208);
     }
+    // Image personnage en bas
+    gfx->draw16bitRGBBitmap((240 - IMG_W) / 2, 155, chara_img, IMG_W, IMG_H);
     gaugeDrawn = true;
 }
 
@@ -169,15 +173,19 @@ void drawTemperature(int temp) {
         arcDot(a, c, ARC_R - ARC_W/2, ARC_W/2);
     }
 
-    // Nombre au centre (gros, police arrondie)
-    gfx->fillRect(45, 75, 150, 55, BG_COLOR);
+    // Température centré X+Y avec °C même couleur
+    gfx->fillRect(50, 88, 140, 40, BG_COLOR);
     gfx->setFont(&FreeSansBold24pt7b);
     gfx->setTextColor(col);
     char buf[6]; snprintf(buf, 6, "%d", temp);
     int16_t x1,y1; uint16_t tw,th;
     gfx->getTextBounds(buf, 0, 0, &x1, &y1, &tw, &th);
-    gfx->setCursor((240 - tw) / 2, 118);
+    int tx = (240 - tw - 12) / 2;
+    gfx->setCursor(tx, 120 + th / 2);
     gfx->print(buf);
+    // ° dessiné comme petit cercle
+    gfx->drawCircle(tx + tw + 6, 120 + th / 2 - th + 4, 4, col);
+    gfx->drawCircle(tx + tw + 6, 120 + th / 2 - th + 4, 3, col);
     gfx->setFont(NULL);
 
     prevTempAngle = targetAngle;
@@ -185,28 +193,30 @@ void drawTemperature(int temp) {
 
 int prevDispRpm = -1;
 
+uint16_t rpmColor(int rpm) {
+    if (rpm < 3000) return 0xF81F;  // vert (~0x07E0)
+    if (rpm < 5000) return 0x001F;  // jaune (~0xFFE0)
+    if (rpm < 6500) return 0x02DF;  // orange (~0xFD20)
+    return 0x07FF;                  // rouge (~0xF800)
+}
+
 void drawRPM(int rpm) {
     if (rpm == prevDispRpm) return;
     prevDispRpm = rpm;
 
-    gfx->fillRect(50, 135, 140, 30, BG_COLOR);
-    gfx->setFont(&FreeSansBold12pt7b);
-    gfx->setTextColor(C_WHITE);
-    char buf[10]; snprintf(buf, 10, "%d", rpm);
+    gfx->fillRect(55, 58, 130, 24, BG_COLOR);
+    gfx->setFont(&FreeSansBold9pt7b);
+    gfx->setTextColor(rpmColor(rpm));
+    char buf[12]; snprintf(buf, 12, "%d RPM", rpm);
     int16_t x1,y1; uint16_t tw,th;
     gfx->getTextBounds(buf, 0, 0, &x1, &y1, &tw, &th);
-    gfx->setCursor((240 - tw) / 2, 158);
+    gfx->setCursor((240 - tw) / 2, 74);
     gfx->print(buf);
     gfx->setFont(NULL);
 }
 
 void drawOBDStatus() {
-    gfx->fillRect(55, 170, 130, 25, BG_COLOR);
-    gfx->setFont(&FreeSansBold9pt7b);
-    gfx->setTextColor(obdConnected ? 0x07E0 : 0xBDF7);
-    gfx->setCursor(obdConnected ? 75 : 82, 188);
-    gfx->print(obdConnected ? "OBD OK" : "OBD...");
-    gfx->setFont(NULL);
+    gfx->fillCircle(42, 120, 4, obdConnected ? 0xF81F : 0x07FF);  // gauche de la temp
 }
 
 // ─── Shift alert (écran rouge clignotant) ────────────────
@@ -237,7 +247,7 @@ void handleShiftAlert() {
     if (shiftActive && millis() - lastShiftFlash >= 150) {
         lastShiftFlash = millis();
         shiftFlashState = !shiftFlashState;
-        gfx->fillScreen(shiftFlashState ? 0x001F : BG_COLOR);  // rouge en BGR
+        gfx->fillScreen(shiftFlashState ? 0x07FF : BG_COLOR);  // rouge (~0xF800)
         if (shiftFlashState) {
             gfx->setTextSize(4); gfx->setTextColor(C_WHITE);
             gfx->setCursor(40, 90); gfx->print("SHIFT!");
